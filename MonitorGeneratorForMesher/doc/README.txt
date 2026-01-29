@@ -1,0 +1,165 @@
+original program developed with "codex 019b92b1-8d6b-7b21-afc5-fe96713a8bef"
+
+hex_VS_triangulation_intersection
+=================================
+
+Overview
+--------
+This program demonstrates how to intersect a triangular surface mesh with
+a hexahedral mesh. Each hex element is decomposed into five tetrahedra
+(using a predefined 1→5 decomposition), and the intersection between each
+triangle and those tetrahedra is computed. The results are exported in VTK
+format for inspection in ParaView:
+
+  * `OUTPUT/hex_mesh.vtu` holds the hexahedral mesh (only the active range
+    of elements at the moment of export).
+  * `OUTPUT/hex_intersection.vtm` references three datasets: the original
+    triangle, a tetrahedral representation of the active hex range, and the
+    intersection primitives (point/segment/polygon). Intersection cells carry
+    a `hex_id` field to map them back to the originating element.
+
+Source structure
+----------------
+* `TRIvsTET.f90` – Core geometry module:
+  - Minimal enclosing sphere routines for quick triangle rejection.
+  - Triangle vs. tetra intersection (`tri_tet_intersect`).
+  - Helpers for sphere/triangle tests and for checking whether any triangle
+    vertex lies inside a decomposed hex.
+
+* `inout.f90` – I/O helpers:
+  - `read_hex_mesh` and `read_tri_mesh` load `*.tri`/`*.off` files.
+  - `write_hex_mesh_vtu` exports the current active set of hexes.
+  - `write_hex_intersection_vtu` emits the multiblock VTK file with the
+    intersection dataset and the `hex_id` attribute.
+
+* `main.f90` – Driver:
+  - Parses command-line options (`-h/--hex`, `-t/--tri`, `-v/--verbose`).
+  - Provides an easy way to restrict processing to a range of hexahedra
+    (`elem_min`, `elem_max`).
+  - Generates progress bars (5% increments) in non-verbose mode for each
+    major loop (candidate gathering, counting, final intersection).
+  - Stores per-element candidate triangles and invokes the intersection
+    routine only on those subsets.
+
+Command-line usage
+------------------
+```
+./hex_VS_triangulation_intersection
+./hex_VS_triangulation_intersection -v
+./hex_VS_triangulation_intersection -h INPUT/hex.tri -t INPUT/tri.off -o OUTPUT
+```
+
+Defaults:
+  - Hex mesh: `INPUT/hex.tri`
+  - Triangle mesh: `INPUT/tri.off`
+  - Output folder: `OUTPUT`
+
+Verbose mode (`-v`) prints detailed diagnostic output for each element:
+  - Candidate triangle IDs.
+  - Intersection results (`itype`, number of points, coordinates).
+
+Non-verbose mode prints only:
+  - Mesh-loading confirmation lines.
+  - Progress bars at 5% increments for each stage.
+  - Final confirmation that the VTK files were written.
+
+Element range
+-------------
+`elem_min` and `elem_max` (currently set inside `main.f90`) define which
+subset of hexahedra is processed. The default covers the entire mesh; set
+both to a single ID to isolate a specific element. If desired, this could
+be promoted to a command-line option in future revisions.
+
+Key outputs
+-----------
+* `<output_folder>/hex_mesh.vtu` – Active hexahedra (with full coordinates).
+* `<output_folder>/hex_intersection.vtm` – Multiblock dataset with:
+  - The tetrahedral decomposition of the active range.
+  - The triangle(s) being intersected.
+  - Intersection primitives, each carrying `hex_id`.
+* `CASE/single.tri` (for hex extracts) and `CASE/single.off` (for triangle
+  extracts) – optional single-element files produced by the Python helper
+  (see “Accessory script” below).
+
+Future ideas
+------------
+* Promote `elem_min/elem_max` to CLI options.
+* Replace the fixed test triangle in `tri_hex_intersections` with triangle
+  data from the surface mesh, so each element is checked only against the
+  triangles in `triangle_indices(elem)%values`.
+* Add timing or MPI parallelization for large meshes.
+
+Procedural outline (TRIvsTET.f90)
+---------------------------------
+The `tri_tet_intersection` module supplies almost all geometric capabilities.
+Below is a more detailed description of its main routines:
+
+* `tri_tet_intersect(A,B,C, P,Q,R,S, eps, itype, X, nX)`
+  - Implements a Sutherland–Hodgman style clipping of triangle `ABC` against
+    tetrahedron `PQRS`.
+  - Maintains two polygon buffers (`poly1`, `poly2`), clips against each face,
+    and compacts the polygon after each step.
+  - Classifies the result (`itype` = 0 none, 1 point, 2 segment, 3 polygon)
+    and returns the ordered vertices in `X(:,1:nX)`.
+  - Uses helpers such as `clip_polygon_by_plane`, `compact_polygon`,
+    `is_collinear`, `is_all_same_point`, etc., to ensure robust results even
+    for degenerate intersections.
+
+* `hexa_tet_vertices(hexPts, tetVerts)`
+  - Converts an 8-node hexahedron into five tetrahedra using the fixed
+    1-hex-to-5-tet decomposition defined in `hex_tet_indices`.
+  - Called both by the intersection loop and by the “triangle vertex inside”
+    tests.
+
+* `tri_hex_intersections(A,B,C, hexPts, eps, itypes, nXs, Xs)`
+  - Convenience wrapper that runs `tri_tet_intersect` against each of the five
+    tetrahedra produced by `hexa_tet_vertices`.
+  - Stores the `itype`, vertex count, and coordinate array for every tetra.
+  - Used twice: first for candidate counting, then again when exporting
+    intersections.
+
+* `compute_hex_bounding_sphere(hexPts, center, radius)`
+  - Calls `minimal_enclosing_sphere` (a brute-force Welzl variant) to derive
+    a sphere containing the hexahedron. This sphere is used to quickly
+    reject triangles that are far away.
+
+* Triangle filtering helpers
+  - `gather_triangles_in_sphere` combines two heuristics to decide whether a
+    triangle should be tested against a hex:
+    1. Distance from the sphere center to the triangle (`triangle_intersects_sphere`)
+       via the `point_triangle_distance2` routine (borrowed from Real-Time Collision
+       Detection).
+    2. Whether any triangle vertex lies inside the actual hex (tested by
+       `any_triangle_vertex_inside_hex`, which in turn calls `point_in_tetra` on
+       each of the five tetrahedra).
+  - After these tests, only the triangles that could plausibly intersect the hex
+    are handed to `tri_hex_intersections`.
+
+* Linear algebra utilities
+  - `solve_linear3` and `swap_rows` form a tiny Gauss-Jordan solver used by
+    `point_in_tetra` and the minimal sphere routines. Everything is marked
+    `pure` so the compiler can inline/optimize aggressively.
+
+These routines are the heart of the intersection pipeline; `main.f90` simply
+orchestrates them based on the selected meshes, element range, and verbose mode.
+
+Accessory script
+----------------
+The repository also contains `extract_single.py`, a small helper for
+debugging or standalone visualization:
+
+```
+python extract_single.py -H INPUT/hex.tri -n 37
+python extract_single.py -t INPUT/tri.off -n 19
+```
+
+Options:
+  * `-H/--hex <file>` – hexahedral mesh in the `.tri` format.
+  * `-t/--tri <file>` – triangle mesh in the `.off` format.
+  * `-n/--number <index>` – 1-based element or triangle index to extract.
+
+It reuses the same mesh readers as the Fortran driver, then writes the
+requested cell into `CASE/single.tri` (for hex meshes) or `CASE/single.off`
+(for triangle meshes). The output
+matches the original format, so you can feed it back into other tooling
+or inspect it in isolation within this codebase.

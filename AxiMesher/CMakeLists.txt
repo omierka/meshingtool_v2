@@ -1,0 +1,1 @@
+install(PROGRAMS generate_hollow_cylinder_mesh.py DESTINATION bin RENAME generate_hollow_cylinder_mesh)

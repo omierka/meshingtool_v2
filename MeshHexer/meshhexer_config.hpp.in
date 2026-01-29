@@ -1,0 +1,3 @@
+#pragma once
+
+#cmakedefine MESHHEXER_HAVE_OMP

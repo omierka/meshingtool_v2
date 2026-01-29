@@ -1,0 +1,49 @@
+---
+# Style Guide Options
+AlignAfterOpenBracket: AlwaysBreak
+BinPackArguments: "false"
+BinPackParameters: "false"
+BreakBeforeBraces: Allman
+ColumnLimit: "120"
+ConstructorInitializerIndentWidth: "2"
+ContinuationIndentWidth: "2"
+FixNamespaceComments: "true"
+IncludeBlocks: Preserve
+IndentCaseLabels: "false"
+IndentWidth: "2"
+MaxEmptyLinesToKeep: "1"
+NamespaceIndentation: All
+PointerAlignment: Left
+IndentAccessModifiers: false
+IndentCaseBlocks: true
+IndentPPDirectives: None
+KeepEmptyLinesAtEOF: true
+# Precedence Options
+SpaceBeforeParens: Custom
+SpaceBeforeParensOptions:
+  AfterControlStatements: false
+  AfterForeachMacros: false
+  AfterFunctionDeclarationName: false
+  AfterFunctionDefinitionName: false
+  AfterIfMacros: false
+  AfterOverloadedOperator: false
+  AfterPlacementOperator: false
+  AfterRequiresInClause: false
+  AfterRequiresInExpression: false
+  BeforeNonEmptyParentheses: false
+BreakConstructorInitializers: AfterColon
+PackConstructorInitializers: CurrentLine
+AlwaysBreakTemplateDeclarations: Yes
+AllowShortFunctionsOnASingleLine: None
+SpaceAfterTemplateKeyword: false
+AllowShortCaseLabelsOnASingleLine: true
+AlignConsecutiveShortCaseStatements:
+  Enabled: true
+  AcrossEmptyLines: true
+  AcrossComments: true
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 1
+# Personal preference -- mmuegge
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowAllArgumentsOnNextLine: false

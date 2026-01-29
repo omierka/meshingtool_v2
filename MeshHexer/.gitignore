@@ -1,0 +1,67 @@
+# Ignore compiled files
+*.o
+*.lo
+*.a
+*.so
+*.so.*
+*.la
+*.pch
+*.obj
+*.exe
+*.lib
+*.dll
+*.ilk
+*.pdb
+*.pyc
+
+# Ignore backup files
+*~
+*.bak
+
+# Ingore junk Mac files
+.DS_Store
+
+# Ignore linkinfo files
+*.linkinfo
+
+# Ignore patch remains
+*.orig
+*.rej
+
+# Ignore vim swap files
+*.swo
+*.swp
+
+# Ignore build system files
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+CTestTestfile.cmake
+CMakeFiles/
+Testing/
+/build
+/.vscode
+compile_commands.json
+
+# Ignore Visual Studio user/filter files
+*.vcxproj.user
+*.vcxproj.filters
+.vs
+
+# Ignore Visual Studio output files
+lib/*
+obj/*
+win/*
+
+# Ignore Visual Studio intermediate files
+*.opensdf
+*.sdf
+*.suo
+*.VC.db
+ipch
+
+# Ignore Windows Links
+*.lnk
+
+# Ignore Visual Studio user-configfiles
+config-vc*.xml
