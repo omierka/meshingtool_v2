@@ -1,4 +1,6 @@
 module tri_tet_intersection
+  use, intrinsic :: iso_c_binding, only: c_double
+  use cgal_bindings, only: cgal_have_triangle_tree, cgal_triangles_in_bbox
   implicit none
   private
   public :: dp
@@ -8,7 +10,7 @@ module tri_tet_intersection
   public :: compute_hex_subdivision_points
   public :: num_hex_tets, num_hex_sub_vertices
 
-  integer, parameter :: dp = kind(1.0d0)
+  integer, parameter :: dp = c_double
   integer, parameter :: max_poly_vertices = 32
   integer, parameter :: num_hex_tets = 40
   integer, parameter :: num_hex_corners = 8
@@ -444,6 +446,57 @@ contains
     integer, intent(in) :: tri_connectivity(:, :)
     integer, intent(in) :: tri_count
     integer, allocatable, intent(out) :: indices(:)
+    real(dp) :: bbox_min(3), bbox_max(3)
+    integer, allocatable :: cgal_candidates(:)
+    integer, allocatable :: selected(:)
+    integer :: i, tri_id, count
+    real(dp) :: triA(3), triB(3), triC(3)
+    logical :: include_triangle
+
+    call compute_hex_bbox(hexPts, bbox_min, bbox_max)
+    if (.not. cgal_have_triangle_tree()) then
+      allocate(indices(0))
+      return
+    end if
+
+    call cgal_triangles_in_bbox(bbox_min, bbox_max, cgal_candidates)
+    if (size(cgal_candidates) > 0) then
+      allocate(selected(size(cgal_candidates)))
+      count = 0
+      do i = 1, size(cgal_candidates)
+        tri_id = cgal_candidates(i)
+        if (tri_id < 1 .or. tri_id > tri_count) cycle
+        triA = tri_points(:, tri_connectivity(1, tri_id))
+        triB = tri_points(:, tri_connectivity(2, tri_id))
+        triC = tri_points(:, tri_connectivity(3, tri_id))
+        include_triangle = triangle_overlaps_bbox(bbox_min, bbox_max, triA, triB, triC) .or. &
+             triangle_vertex_inside_bbox(bbox_min, bbox_max, triA, triB, triC)
+        if (include_triangle) then
+          count = count + 1
+          selected(count) = tri_id
+        end if
+      end do
+      if (count > 0) then
+        allocate(indices(count))
+        indices = selected(1:count)
+      else
+        allocate(indices(0))
+      end if
+      deallocate(selected)
+    else
+      allocate(indices(0))
+    end if
+    if (allocated(cgal_candidates)) deallocate(cgal_candidates)
+
+  end subroutine gather_triangles_in_sphere
+
+  subroutine gather_triangles_in_sphere_fallback(center, radius, hexPts, tri_points, tri_connectivity, tri_count, indices)
+    real(dp), intent(in) :: center(3), radius
+    real(dp), intent(in) :: hexPts(3,8)
+    real(dp), intent(in) :: tri_points(:, :)
+    integer, intent(in) :: tri_connectivity(:, :)
+    integer, intent(in) :: tri_count
+    integer, allocatable, intent(out) :: indices(:)
 
     integer :: i, count
     logical :: inside
@@ -482,7 +535,71 @@ contains
         indices(count) = i
       end if
     end do
-  end subroutine gather_triangles_in_sphere
+  end subroutine gather_triangles_in_sphere_fallback
+
+  pure subroutine compute_hex_bbox(hexPts, bbox_min, bbox_max)
+    real(dp), intent(in) :: hexPts(3,8)
+    real(dp), intent(out) :: bbox_min(3), bbox_max(3)
+    integer :: k
+    do k = 1, 3
+      bbox_min(k) = minval(hexPts(k, :))
+      bbox_max(k) = maxval(hexPts(k, :))
+    end do
+  end subroutine compute_hex_bbox
+
+  pure logical function boxes_overlap(minA, maxA, minB, maxB)
+    real(dp), intent(in) :: minA(3), maxA(3), minB(3), maxB(3)
+    integer :: i
+    boxes_overlap = .true.
+    do i = 1, 3
+      if (maxA(i) < minB(i)) then
+        boxes_overlap = .false.
+        return
+      end if
+      if (minA(i) > maxB(i)) then
+        boxes_overlap = .false.
+        return
+      end if
+    end do
+  end function boxes_overlap
+
+  pure logical function point_inside_bbox(bbox_min, bbox_max, p)
+    real(dp), intent(in) :: bbox_min(3), bbox_max(3), p(3)
+    real(dp), parameter :: tol = 1.0d-12
+    integer :: i
+    point_inside_bbox = .true.
+    do i = 1, 3
+      if (p(i) < bbox_min(i) - tol) then
+        point_inside_bbox = .false.
+        return
+      end if
+      if (p(i) > bbox_max(i) + tol) then
+        point_inside_bbox = .false.
+        return
+      end if
+    end do
+  end function point_inside_bbox
+
+  pure logical function triangle_vertex_inside_bbox(bbox_min, bbox_max, a, b, c)
+    real(dp), intent(in) :: bbox_min(3), bbox_max(3)
+    real(dp), intent(in) :: a(3), b(3), c(3)
+    triangle_vertex_inside_bbox = point_inside_bbox(bbox_min, bbox_max, a) .or. &
+         point_inside_bbox(bbox_min, bbox_max, b) .or. &
+         point_inside_bbox(bbox_min, bbox_max, c)
+  end function triangle_vertex_inside_bbox
+
+  pure logical function triangle_overlaps_bbox(bbox_min, bbox_max, a, b, c)
+    real(dp), intent(in) :: bbox_min(3), bbox_max(3)
+    real(dp), intent(in) :: a(3), b(3), c(3)
+    real(dp) :: tri_min(3), tri_max(3)
+    integer :: k
+    do k = 1, 3
+      tri_min(k) = minval([a(k), b(k), c(k)])
+      tri_max(k) = maxval([a(k), b(k), c(k)])
+    end do
+    triangle_overlaps_bbox = boxes_overlap(bbox_min, bbox_max, tri_min, tri_max)
+  end function triangle_overlaps_bbox
+
 
   pure logical function any_triangle_vertex_inside_hex(hexPts, p1, p2, p3)
     real(dp), intent(in) :: hexPts(3,8)

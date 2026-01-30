@@ -6,6 +6,8 @@ project(
   LANGUAGES C CXX Fortran
 )
 
+set(CMAKE_BUILD_TYPE "Release")
+
 # Overwrite HexMesher options
 set(MESHHEXER_BUILD_APPLICATIONS ON CACHE BOOL "" FORCE)
 set(MESHHEXER_DOCUMENTATION OFF CACHE BOOL "" FORCE)
@@ -28,3 +30,4 @@ install(TARGETS meshhexer-cli DESTINATION bin)
 
 # Install runner
 install(PROGRAMS runner.sh DESTINATION bin RENAME newgenmeshingtool)
+install(PROGRAMS run_all_cases.sh DESTINATION bin)

@@ -2,6 +2,7 @@ program demo
   use mpi
   use tri_tet_intersection
   use hex_io
+  use cgal_bindings, only: cgal_initialize_triangle_tree, cgal_finalize_triangle_tree, cgal_have_triangle_tree
   implicit none
   integer, parameter :: max_vertices = 32
   integer, parameter :: num_tets = num_hex_tets
@@ -59,6 +60,10 @@ program demo
   character(len=512) :: file_base, tet_file_path, int_file_path
   character(len=512) :: mesh_piece_file, pvtu_path, prefix_path, area_file
   integer :: next_pct_pre, next_pct_count, next_pct_out
+  logical :: progress_line_open
+  real(dp) :: t_pre_start, t_pre_elapsed, t_pre_max
+  real(dp) :: t_count_start, t_count_elapsed, t_count_max
+  real(dp) :: t_out_start, t_out_elapsed, t_out_max
   type tMonitor
    real(dp), allocatable :: MIS(:),AREA(:),aux(:)
   end type
@@ -115,6 +120,8 @@ program demo
     argi = argi + 1
   end do
 
+  progress_line_open = .false.
+
   call MPI_Init(ierr)
   call MPI_Comm_rank(MPI_COMM_WORLD, mpi_rank, ierr)
   call MPI_Comm_size(MPI_COMM_WORLD, mpi_size, ierr)
@@ -133,6 +140,21 @@ program demo
          'Loaded triangle mesh:', trim(tri_file), nvt_tri, ntri
   end if
 
+  call cgal_initialize_triangle_tree(nvt_tri, ntri, dcorvg_tri, kvert_tri)
+  if (mpi_rank == 0) then
+    if (cgal_have_triangle_tree()) then
+      write(*,*) 'CGAL triangle accelerator initialized (AABB tree ready)'
+    else
+      write(*,*) 'CGAL accelerator unavailable'
+    end if
+  end if
+  if (.not. cgal_have_triangle_tree()) then
+    if (mpi_rank == 0) write(*,*) 'CGAL acceleration required for this build; aborting.'
+    call cgal_finalize_triangle_tree()
+    call MPI_Finalize(ierr)
+    stop 1
+  end if
+
 !   elem_min = 37
 !   elem_max = 37
   elem_min = 1
@@ -140,12 +162,14 @@ program demo
 
   if (dMinGap < 0.0_dp) then
     if (mpi_rank == 0) print *, "the --mingap/-m parameter for mingap is not properly set"
+    call cgal_finalize_triangle_tree()
     call MPI_Finalize(ierr)
     stop 1
   end if
 
   if (nel_hex <= 0) then
     if (mpi_rank == 0) print *, "Mesh contains no hexahedra"
+    call cgal_finalize_triangle_tree()
     call MPI_Finalize(ierr)
     stop 1
   end if
@@ -158,6 +182,7 @@ program demo
   if (elem_max > nel_hex) elem_max = nel_hex
   if (elem_min > elem_max) then
     if (mpi_rank == 0) print *, "Invalid element range"
+    call cgal_finalize_triangle_tree()
     call MPI_Finalize(ierr)
     stop 1
   end if
@@ -175,9 +200,9 @@ program demo
     local_elem_max = local_elem_min - 1
   end if
 
-  next_pct_pre = 5
-  next_pct_count = 5
-  next_pct_out = 5
+  next_pct_pre = 1
+  next_pct_count = 1
+  next_pct_out = 1
 
   total_tets = num_tets * local_n_active
   total_sub_vertices = num_hex_sub_vertices * local_n_active
@@ -209,6 +234,7 @@ program demo
     if (.not. verbose .and. mpi_rank == 0) write(*,*) 'Preprocessing hexahedra...'
     elem = local_elem_min
   end if
+  t_pre_start = MPI_Wtime()
   do while (.not. stage_finished)
     if (elem <= local_elem_max) then
       range_idx = elem - local_elem_min + 1
@@ -240,6 +266,9 @@ program demo
     end if
     call sync_progress(local_pre_done, n_active, next_pct_pre, '  Preprocessing progress: ', mpi_rank, stage_finished)
   end do
+  t_pre_elapsed = MPI_Wtime() - t_pre_start
+  call MPI_Reduce(t_pre_elapsed, t_pre_max, 1, MPI_DOUBLE_PRECISION, MPI_MAX, 0, MPI_COMM_WORLD, ierr)
+  if (mpi_rank == 0) write(*,'(A,F10.3," s")') 'Preprocessing loop time (max rank):', t_pre_max
 
   total_int_cells = 0
   total_int_points = 0
@@ -250,6 +279,7 @@ program demo
     if (.not. verbose .and. mpi_rank == 0) write(*,*) 'Counting potential intersections...'
     elem = local_elem_min
   end if
+  t_count_start = MPI_Wtime()
   do while (.not. stage_finished)
     if (elem <= local_elem_max) then
       range_idx = elem - local_elem_min + 1
@@ -286,6 +316,9 @@ program demo
     end if
     call sync_progress(local_count_done, n_active, next_pct_count, '  Counting progress: ', mpi_rank, stage_finished)
   end do
+  t_count_elapsed = MPI_Wtime() - t_count_start
+  call MPI_Reduce(t_count_elapsed, t_count_max, 1, MPI_DOUBLE_PRECISION, MPI_MAX, 0, MPI_COMM_WORLD, ierr)
+  if (mpi_rank == 0) write(*,'(A,F10.3," s")') 'Counting loop time (max rank):   ', t_count_max
 
   if (total_int_points > 0) then
     allocate(int_points(3, total_int_points))
@@ -312,6 +345,7 @@ program demo
     elem = local_elem_min
   end if
   local_out_done = 0
+  t_out_start = MPI_Wtime()
   do while (.not. stage_finished)
     if (elem <= local_elem_max) then
       elem_surface = 0.0_dp
@@ -392,6 +426,9 @@ program demo
     end if
     call sync_progress(local_out_done, n_active, next_pct_out, '  Intersection progress: ', mpi_rank, stage_finished)
   end do
+  t_out_elapsed = MPI_Wtime() - t_out_start
+  call MPI_Reduce(t_out_elapsed, t_out_max, 1, MPI_DOUBLE_PRECISION, MPI_MAX, 0, MPI_COMM_WORLD, ierr)
+  if (mpi_rank == 0) write(*,'(A,F10.3," s")') 'Intersection loop time (max rank):', t_out_max
 
   call MPI_Allreduce(Monitor%MIS, Monitor%aux, nel_hex, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD, ierr_comm)
   Monitor%MIS = Monitor%aux
@@ -431,8 +468,6 @@ program demo
   call compose_path(output_folder, trim(file_base), file_base)
   call write_hex_intersection_vtu(trim(file_base), tet_points, tet_conn, &
        int_points, int_conn, int_offsets, int_types, int_hex_ids, tet_file_path, int_file_path)
-  write(*,'(A,I0,A,1X,A)') 'Rank ', mpi_rank, ' tets ->', trim(tet_file_path)
-  write(*,'(A,I0,A,1X,A)') 'Rank ', mpi_rank, ' intersections ->', trim(int_file_path)
   call MPI_Barrier(MPI_COMM_WORLD, ierr)
   if (mpi_rank == 0) then
     call compose_path(output_folder, 'hex_intersection_tets.pvtu', pvtu_path)
@@ -442,6 +477,7 @@ program demo
     call write_pvtu_reference(trim(pvtu_path), mpi_size, trim(prefix_path), "_intersections.vtu", "hex_id")
   end if
 
+  call cgal_finalize_triangle_tree()
   call MPI_Finalize(ierr)
 contains
 
@@ -461,13 +497,32 @@ contains
     call MPI_Allreduce(local_done, global_done, 1, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, ierr_loc)
     if (rank == 0) then
       pct_loc = int( (real(global_done, dp)/real(total_work, dp))*100.0_dp )
+      pct_loc = max(0, min(100, pct_loc))
       do while (pct_loc >= next_pct .and. next_pct <= 100)
-        write(*,'(A,I3,"%%")') label, next_pct
-        next_pct = next_pct + 5
+        call ensure_progress_line(label)
+        write(*,'(A)', advance='no') '%'
+        next_pct = next_pct + 1
       end do
+      if (global_done >= total_work) call finalize_progress_line()
     end if
     if (global_done >= total_work) finished = .true.
   end subroutine sync_progress
+
+  subroutine ensure_progress_line(label)
+    character(len=*), intent(in) :: label
+    if (.not. progress_line_open) then
+      write(*,'(A)', advance='no') trim(label)//' ['
+      progress_line_open = .true.
+    end if
+  end subroutine ensure_progress_line
+
+  subroutine finalize_progress_line()
+    if (progress_line_open) then
+      write(*,'(A)', advance='no') '] 100%'
+      write(*,*)
+      progress_line_open = .false.
+    end if
+  end subroutine finalize_progress_line
 
   subroutine ensure_directory(dir)
     character(len=*), intent(in) :: dir

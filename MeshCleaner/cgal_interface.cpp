@@ -1,5 +1,5 @@
 #include <CGAL/AABB_face_graph_triangle_primitive.h>
-#include <CGAL/AABB_traits_3.h>
+#include <CGAL/AABB_traits.h>
 #include <CGAL/AABB_tree.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Min_sphere_of_spheres_d.h>
@@ -27,7 +27,7 @@ using SurfaceMesh = CGAL::Surface_mesh<Kernel::Point_3>;
 using SphereTraits = CGAL::Min_sphere_of_spheres_d_traits_3<Kernel, double, CGAL::Tag_true>;
 using MinSphere = CGAL::Min_sphere_of_spheres_d<SphereTraits>;
 using Primitive = CGAL::AABB_face_graph_triangle_primitive<SurfaceMesh>;
-using AABBTraits = CGAL::AABB_traits_3<Kernel, Primitive>;
+using AABBTraits = CGAL::AABB_traits<Kernel, Primitive>;
 using AABBTree = CGAL::AABB_tree<AABBTraits>;
 using SideTester = CGAL::Side_of_triangle_mesh<SurfaceMesh, Kernel>;
 
