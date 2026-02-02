@@ -82,7 +82,7 @@ mkdir -p "${FOLDER}/Coarse_meshDir"
 
 # Coarse-coarse-mesh-creation
 ./generate_hollow_cylinder_mesh \
-  -i "${FOLDER}/MESHCONFIG.dat" \
+  -i "${FOLDER}/setup.e3d" \
   -o "${FOLDER}/Coarse_meshDir/Mesh.tri" \
   -s "${CoarseMeshSize}"
 
@@ -120,7 +120,7 @@ print_stage 4
 print_stage 5
 # Final-Mesh-Filtering
 mpirun -np ${NumProc} ./meshcleaner \
-  -h "${FOLDER}/NEW_meshDir/ReducedMesh.tri" \
+  -h "${FOLDER}/meshDir_BU/Merged_Mesh.tri" \
   -t "${FOLDER}/surface.off" \
   -s 10.0 \
   -o "${FOLDER}"

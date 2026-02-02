@@ -178,65 +178,122 @@ contains
         character(len=*), intent(in) :: section, key, value
         type(MeshConfig), intent(inout) :: config
         character(len=128) :: section_id, key_id
-        real(c_double) :: temp_vec(3)
-        logical :: parsed
+        logical :: handled
 
         section_id = lowercase(trim(section))
         key_id = lowercase(trim(key))
+        handled = .false.
 
         select case (section_id)
-        case ("e3dsimulationsettings")
-            select case (key_id)
-            case ("hexmesher")
-                call set_mesh_type(config, value)
-            case ("sel_x")
-                parsed = try_parse_real(value, config%box%spacing(1))
-                if (parsed) config%box%has_spacing = .true.
-            case ("sel_y")
-                parsed = try_parse_real(value, config%box%spacing(2))
-                if (parsed) config%box%has_spacing = .true.
-            case ("sel_z")
-                parsed = try_parse_real(value, config%box%spacing(3))
-                if (parsed) config%box%has_spacing = .true.
-            case ("sel_tangential")
-                parsed = try_parse_real(value, config%cylinder%spacing(1))
-                if (parsed) config%cylinder%has_spacing = .true.
-            case ("sel_radial")
-                parsed = try_parse_real(value, config%cylinder%spacing(2))
-                if (parsed) config%cylinder%has_spacing = .true.
-            case ("sel_axial")
-                parsed = try_parse_real(value, config%cylinder%spacing(3))
-                if (parsed) config%cylinder%has_spacing = .true.
-            end select
-        case ("e3dgeometrydata/machine")
-            select case (key_id)
-            case ("geometrystart")
-                parsed = try_parse_real_vector(value, temp_vec)
-                if (parsed) then
-                    config%box%geometry_start = temp_vec
-                    config%box%has_geometry_start = .true.
-                end if
-            case ("geometrylength")
-                parsed = try_parse_real_vector(value, temp_vec)
-                if (parsed) then
-                    config%box%geometry_length = temp_vec
-                    config%box%has_geometry_length = .true.
-                end if
-            case ("barreldiameter")
-                parsed = try_parse_real(value, config%cylinder%barrel_diameter)
-                if (parsed) config%cylinder%has_barrel_diameter = .true.
-            case ("innerdiameter")
-                parsed = try_parse_real(value, config%cylinder%inner_diameter)
-                if (parsed) config%cylinder%has_inner_diameter = .true.
-            case ("barrellength")
-                parsed = try_parse_real(value, config%cylinder%barrel_length)
-                if (parsed) config%cylinder%has_barrel_length = .true.
-            case ("axialstartposition")
-                parsed = try_parse_real(value, config%cylinder%axial_start)
-                if (parsed) config%cylinder%has_axial_start = .true.
-            end select
+        case ("e3dgeometrydata/preprocessing")
+            handled = assign_simulation_key(key_id, value, config)
+            if (.not. handled) handled = assign_geometry_key(key_id, value, config)
+        case default
+            handled = .false.
         end select
     end subroutine assign_config_value
+
+    logical function assign_simulation_key(key_id, value, config)
+        character(len=*), intent(in) :: key_id, value
+        type(MeshConfig), intent(inout) :: config
+        logical :: parsed
+
+        assign_simulation_key = .false.
+        select case (key_id)
+        case ("hexmesher")
+            call set_mesh_type(config, value)
+            assign_simulation_key = .true.
+        case ("sel_x")
+            parsed = try_parse_real(value, config%box%spacing(1))
+            if (parsed) then
+                config%box%has_spacing = .true.
+                assign_simulation_key = .true.
+            end if
+        case ("sel_y")
+            parsed = try_parse_real(value, config%box%spacing(2))
+            if (parsed) then
+                config%box%has_spacing = .true.
+                assign_simulation_key = .true.
+            end if
+        case ("sel_z")
+            parsed = try_parse_real(value, config%box%spacing(3))
+            if (parsed) then
+                config%box%has_spacing = .true.
+                assign_simulation_key = .true.
+            end if
+        case ("sel_tangential")
+            parsed = try_parse_real(value, config%cylinder%spacing(1))
+            if (parsed) then
+                config%cylinder%has_spacing = .true.
+                assign_simulation_key = .true.
+            end if
+        case ("sel_radial")
+            parsed = try_parse_real(value, config%cylinder%spacing(2))
+            if (parsed) then
+                config%cylinder%has_spacing = .true.
+                assign_simulation_key = .true.
+            end if
+        case ("sel_axial")
+            parsed = try_parse_real(value, config%cylinder%spacing(3))
+            if (parsed) then
+                config%cylinder%has_spacing = .true.
+                assign_simulation_key = .true.
+            end if
+        case default
+            assign_simulation_key = .false.
+        end select
+    end function assign_simulation_key
+
+    logical function assign_geometry_key(key_id, value, config)
+        character(len=*), intent(in) :: key_id, value
+        type(MeshConfig), intent(inout) :: config
+        real(c_double) :: temp_vec(3)
+        logical :: parsed
+
+        assign_geometry_key = .false.
+        select case (key_id)
+        case ("geometrystart")
+            parsed = try_parse_real_vector(value, temp_vec)
+            if (parsed) then
+                config%box%geometry_start = temp_vec
+                config%box%has_geometry_start = .true.
+                assign_geometry_key = .true.
+            end if
+        case ("geometrylength")
+            parsed = try_parse_real_vector(value, temp_vec)
+            if (parsed) then
+                config%box%geometry_length = temp_vec
+                config%box%has_geometry_length = .true.
+                assign_geometry_key = .true.
+            end if
+        case ("barreldiameter")
+            parsed = try_parse_real(value, config%cylinder%barrel_diameter)
+            if (parsed) then
+                config%cylinder%has_barrel_diameter = .true.
+                assign_geometry_key = .true.
+            end if
+        case ("innerdiameter")
+            parsed = try_parse_real(value, config%cylinder%inner_diameter)
+            if (parsed) then
+                config%cylinder%has_inner_diameter = .true.
+                assign_geometry_key = .true.
+            end if
+        case ("barrellength")
+            parsed = try_parse_real(value, config%cylinder%barrel_length)
+            if (parsed) then
+                config%cylinder%has_barrel_length = .true.
+                assign_geometry_key = .true.
+            end if
+        case ("axialstartposition")
+            parsed = try_parse_real(value, config%cylinder%axial_start)
+            if (parsed) then
+                config%cylinder%has_axial_start = .true.
+                assign_geometry_key = .true.
+            end if
+        case default
+            assign_geometry_key = .false.
+        end select
+    end function assign_geometry_key
 
     subroutine set_mesh_type(config, raw_value)
         type(MeshConfig), intent(inout) :: config

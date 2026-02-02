@@ -58,9 +58,8 @@ to generate a coarse mesh.
 
 The input directory given as an argument to ```newgenmeshingtool``` needs to contain the following files:
 - ```surface.off```, the surface mesh to generate a coarse mesh for
-- ```MESHCONFIG.dat```, configuration file for the mesh generator
-- ```setup.e3d```, simulation settings
-- ```param_meshref.cfg```, 
+- ```setup.e3d```, preprocessing and simulation settings
+- ```param_meshref.cfg```,
 
 The directory you are calling ```newgenmeshingtool``` from needs to contain the following files:
 - a ```PATCHES``` directory, containing the necessary patches for ```meshref```
@@ -71,33 +70,28 @@ Parts of the application are parallelized using either OMP or MPI. Set a sane va
 
 
 
-Example MESHCONFIG.dat for Box-Mesh
+Example setup.e3d for Box-Mesh
 ```
 [E3DGeometryData]
-[E3DGeometryData/Machine]
-geometryStart = -330.00,-104.50,0.00
-geometryLength = +660.0,209.0,520.0
-
-[E3DSimulationsettings]
+[E3DGeometryData/Preprocessing]
 HexMesher=Box
 sEl_x = 1.0
 sEl_y = 0.6
 sEl_z = 1.0
+geometryStart = -330.00,-104.50,0.00
+geometryLength = +660.0,209.0,520.0
 ```
 
-Example MESHCONFIG.dat for HollowCylinder-Mesh
+Example setup.e3d for HollowCylinder-Mesh
 ```
 [E3DGeometryData]
-[E3DGeometryData/Machine]
-BarrelDiameter = 1000.0
-InnerDiameter = 440.0
-BarrelLength = 625.0
-AxialStartPosition = -54.0
-
-[E3DSimulationsettings]
+[E3DGeometryData/Preprocessing]
 HexMesher=HollowCylinder
 sEl_Tangential = 1.25
 sEl_Radial = 0.66
 sEl_Axial = 1.0
+BarrelDiameter = 1000.0
+InnerDiameter = 440.0
+BarrelLength = 625.0
+AxialStartPosition = -54.0
 ```
-

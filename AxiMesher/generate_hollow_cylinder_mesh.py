@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Structured hexahedral mesh generator for hollow cylinders.
 
-The script reads the `Extrud3D_0.dat` style configuration file and produces
-an output that mimics the `.tri` layout seen in `Mesh.tri`.  Only the fields
-needed for the provided mesh (geometry + tangential/radial/axial resolutions)
-are parsed.
+The script reads the unified `setup.e3d` preprocessing configuration file and
+produces an output that mimics the `.tri` layout seen in `Mesh.tri`. Only the
+fields needed for the provided mesh (geometry + tangential/radial/axial
+resolutions) are parsed.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple, Union
+from typing import Iterable, List, Tuple, Union
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,8 +28,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Path to Extrud3D_0.dat (Ini-style) configuration file. "
-            "Defaults to ./Extrud3D_0.dat."
+            "Path to setup.e3d (Ini-style) configuration file. "
+            "Defaults to ./setup.e3d."
         ),
     )
     parser.add_argument(
@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
         "--input",
         dest="input_path",
         type=Path,
-        help="Alternative way to specify the Extrud3D_0.dat file.",
+        help="Alternative way to specify the setup.e3d file.",
     )
     parser.add_argument(
         "-o",
@@ -105,8 +105,12 @@ def read_parameters(
     if not cfg.read(path):
         raise FileNotFoundError(f"Unable to read configuration file {path!s}")
 
-    geom = cfg["E3DGeometryData/Machine"]
-    sim = cfg["E3DSimulationsettings"]
+    if not cfg.has_section("E3DGeometryData/Preprocessing"):
+        raise KeyError("Missing [E3DGeometryData/Preprocessing] section.")
+
+    preprocess = cfg["E3DGeometryData/Preprocessing"]
+    geom = preprocess
+    sim = preprocess
     hex_mesher = sim.get("HexMesher", "Axi").strip().lower()
 
     if hex_mesher == "box":
@@ -542,7 +546,7 @@ def main() -> None:
     args = parse_args()
     try:
         config_path = (
-            args.input_path or args.config_path or Path("Extrud3D_0.dat")
+            args.input_path or args.config_path or Path("setup.e3d")
         )
         mesh_input = read_parameters(config_path)
 

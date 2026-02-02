@@ -184,7 +184,7 @@ program fortran_cgal_demo
     worker_rank = mpi_rank - 1
 
     call parse_arguments(surface_file, hex_file, hex_scale, output_folder)
-    call build_config_path(output_folder, "MESHCONFIG.dat", config_file)
+    call build_config_path(output_folder, "setup.e3d", config_file)
     call build_config_path(output_folder, "meshDir", mesh_output_folder)
     if (len_trim(config_file) > 0) then
         call load_mesh_config(trim(config_file), mesh_config)
