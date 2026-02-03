@@ -56,6 +56,14 @@ print_stage() {
   fi
 }
 
+emit_info() {
+  if [ "$SILENT" -eq 1 ]; then
+    printf '%s\n' "$1" >&3
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
 if [ "$SILENT" -eq 1 ]; then
   exec >/dev/null
 fi
@@ -69,13 +77,13 @@ print_stage 0
 
 # ---- compute mindist + CoarseMeshSize ----
 mindist="$(./meshhexer-cli --checkpoint-path "${FOLDER}/MINGAP.vtu" min-gap "${FOLDER}/surface.off")"
-echo "mindist=${mindist}"
+emit_info "mindist=${mindist}"
 
 #stage[1]
 print_stage 1
 
 CoarseMeshSize="$(python -c "print(float('${mindist}')*16.0)")"
-echo "CoarseMeshSize=${CoarseMeshSize}"
+emit_info "CoarseMeshSize=${CoarseMeshSize}"
 
 # ---- workflow ----
 mkdir -p "${FOLDER}/Coarse_meshDir"

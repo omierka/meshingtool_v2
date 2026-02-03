@@ -1,5 +1,6 @@
 module bc_treatment
     use iso_c_binding, only: c_double, c_int
+    use setupe3dfile_reader, only: MeshConfig, ProcessParameters, ProcessInflow
     implicit none
     private
 
@@ -19,36 +20,6 @@ module bc_treatment
         integer, allocatable :: face_ids(:)
     end type FaceList
 
-    type, public :: BoxMeshConfig
-        real(c_double) :: geometry_start(3) = 0.0_c_double
-        real(c_double) :: geometry_length(3) = 0.0_c_double
-        real(c_double) :: spacing(3) = 0.0_c_double
-        logical :: has_geometry_start = .false.
-        logical :: has_geometry_length = .false.
-        logical :: has_spacing = .false.
-    end type BoxMeshConfig
-
-    type, public :: HollowCylinderMeshConfig
-        real(c_double) :: barrel_diameter = 0.0_c_double
-        real(c_double) :: inner_diameter = 0.0_c_double
-        real(c_double) :: barrel_length = 0.0_c_double
-        real(c_double) :: axial_start = 0.0_c_double
-        real(c_double) :: spacing(3) = 0.0_c_double
-        logical :: has_barrel_diameter = .false.
-        logical :: has_inner_diameter = .false.
-        logical :: has_barrel_length = .false.
-        logical :: has_axial_start = .false.
-        logical :: has_spacing = .false.
-    end type HollowCylinderMeshConfig
-
-    type, public :: MeshConfig
-        character(len=64) :: mesh_type = "UNSPECIFIED"
-        logical :: loaded = .false.
-        character(len=512) :: source_file = ""
-        type(BoxMeshConfig) :: box
-        type(HollowCylinderMeshConfig) :: cylinder
-    end type MeshConfig
-
     type, public :: HollowCylinderBoundaryClassification
         real(c_double) :: min_edge_length = 0.0_c_double
         real(c_double) :: tolerance = 0.0_c_double
@@ -63,7 +34,16 @@ module bc_treatment
         type(FaceList) :: cyl_inner_faces
         type(FaceList) :: axial_min_faces
         type(FaceList) :: axial_max_faces
+        type(InflowBoundaryGroup), allocatable :: inflow_groups(:)
     end type HollowCylinderBoundaryClassification
+
+    type, public :: InflowBoundaryGroup
+        integer :: inflow_index = 0
+        integer :: inflow_type = 0
+        character(len=32) :: label = ""
+        type(FaceList) :: faces
+        integer, allocatable :: nodes(:)
+    end type InflowBoundaryGroup
 
     type, public :: BoxBoundaryClassification
         real(c_double) :: min_edge_length = 0.0_c_double
@@ -83,285 +63,13 @@ module bc_treatment
         type(FaceList) :: y_max_faces
         type(FaceList) :: z_min_faces
         type(FaceList) :: z_max_faces
+        type(InflowBoundaryGroup), allocatable :: inflow_groups(:)
     end type BoxBoundaryClassification
 
-    public :: initialize_mesh_config, load_mesh_config, log_mesh_config
     public :: recompute_knpr_from_connectivity
     public :: classify_hollowcylinder_boundaries, classify_box_boundaries
 
 contains
-    subroutine initialize_mesh_config(config)
-        type(MeshConfig), intent(out) :: config
-
-        config%mesh_type = "UNSPECIFIED"
-        config%loaded = .false.
-        config%source_file = ""
-        config%box = BoxMeshConfig()
-        config%cylinder = HollowCylinderMeshConfig()
-    end subroutine initialize_mesh_config
-
-    subroutine load_mesh_config(filename, config)
-        character(len=*), intent(in) :: filename
-        type(MeshConfig), intent(inout) :: config
-
-        logical :: exists
-        integer :: unit, ios, eq_pos, line_len
-        character(len=512) :: raw_line, line, section, key, value
-
-        inquire(file=filename, exist=exists)
-        if (.not. exists) then
-            write(*, '(A)') "Mesh configuration file not found: "//trim(filename)
-            return
-        end if
-
-        call initialize_mesh_config(config)
-        config%source_file = trim(filename)
-        section = ""
-
-        open(newunit=unit, file=filename, status="old", action="read")
-        do
-            read(unit, '(A)', iostat=ios) raw_line
-            if (ios /= 0) exit
-            line = adjustl(trim(raw_line))
-            line_len = len_trim(line)
-            if (line_len == 0) cycle
-            if (line(1:1) == "!" .or. line(1:1) == "#") cycle
-            if (line(1:1) == "[") then
-                call parse_section_name(line, section)
-                cycle
-            end if
-            eq_pos = index(line, "=")
-            if (eq_pos <= 1 .or. eq_pos >= line_len) cycle
-            key = trim(adjustl(line(:eq_pos - 1)))
-            value = trim(adjustl(line(eq_pos + 1:)))
-            call assign_config_value(section, key, value, config)
-        end do
-        close(unit)
-        config%loaded = .true.
-    end subroutine load_mesh_config
-
-    subroutine log_mesh_config(config)
-        type(MeshConfig), intent(in) :: config
-        character(len=32) :: type_token
-
-        if (.not. config%loaded) then
-            return
-        end if
-
-        write(*,'(A)') "Mesh configuration summary:"
-        write(*,'(A,1X,A)') "  Source:", trim(config%source_file)
-        write(*,'(A,1X,A)') "  HexMesher:", trim(config%mesh_type)
-        type_token = lowercase(trim(config%mesh_type))
-        select case (trim(type_token))
-        case ("box")
-            if (config%box%has_geometry_start) &
-                write(*,'(A,3(1X,ES12.5))') "  geometryStart:", config%box%geometry_start
-            if (config%box%has_geometry_length) &
-                write(*,'(A,3(1X,ES12.5))') "  geometryLength:", config%box%geometry_length
-            if (config%box%has_spacing) &
-                write(*,'(A,3(1X,ES12.5))') "  sEl(x,y,z):", config%box%spacing
-        case ("hollowcylinder")
-            if (config%cylinder%has_barrel_diameter) &
-                write(*,'(A,1X,ES12.5)') "  BarrelDiameter:", config%cylinder%barrel_diameter
-            if (config%cylinder%has_inner_diameter) &
-                write(*,'(A,1X,ES12.5)') "  InnerDiameter :", config%cylinder%inner_diameter
-            if (config%cylinder%has_barrel_length) &
-                write(*,'(A,1X,ES12.5)') "  BarrelLength  :", config%cylinder%barrel_length
-            if (config%cylinder%has_axial_start) &
-                write(*,'(A,1X,ES12.5)') "  AxialStartPos :", config%cylinder%axial_start
-            if (config%cylinder%has_spacing) &
-                write(*,'(A,3(1X,ES12.5))') "  sEl(tan,rad,ax):", config%cylinder%spacing
-        end select
-    end subroutine log_mesh_config
-
-    subroutine assign_config_value(section, key, value, config)
-        character(len=*), intent(in) :: section, key, value
-        type(MeshConfig), intent(inout) :: config
-        character(len=128) :: section_id, key_id
-        logical :: handled
-
-        section_id = lowercase(trim(section))
-        key_id = lowercase(trim(key))
-        handled = .false.
-
-        select case (section_id)
-        case ("e3dgeometrydata/preprocessing")
-            handled = assign_simulation_key(key_id, value, config)
-            if (.not. handled) handled = assign_geometry_key(key_id, value, config)
-        case default
-            handled = .false.
-        end select
-    end subroutine assign_config_value
-
-    logical function assign_simulation_key(key_id, value, config)
-        character(len=*), intent(in) :: key_id, value
-        type(MeshConfig), intent(inout) :: config
-        logical :: parsed
-
-        assign_simulation_key = .false.
-        select case (key_id)
-        case ("hexmesher")
-            call set_mesh_type(config, value)
-            assign_simulation_key = .true.
-        case ("sel_x")
-            parsed = try_parse_real(value, config%box%spacing(1))
-            if (parsed) then
-                config%box%has_spacing = .true.
-                assign_simulation_key = .true.
-            end if
-        case ("sel_y")
-            parsed = try_parse_real(value, config%box%spacing(2))
-            if (parsed) then
-                config%box%has_spacing = .true.
-                assign_simulation_key = .true.
-            end if
-        case ("sel_z")
-            parsed = try_parse_real(value, config%box%spacing(3))
-            if (parsed) then
-                config%box%has_spacing = .true.
-                assign_simulation_key = .true.
-            end if
-        case ("sel_tangential")
-            parsed = try_parse_real(value, config%cylinder%spacing(1))
-            if (parsed) then
-                config%cylinder%has_spacing = .true.
-                assign_simulation_key = .true.
-            end if
-        case ("sel_radial")
-            parsed = try_parse_real(value, config%cylinder%spacing(2))
-            if (parsed) then
-                config%cylinder%has_spacing = .true.
-                assign_simulation_key = .true.
-            end if
-        case ("sel_axial")
-            parsed = try_parse_real(value, config%cylinder%spacing(3))
-            if (parsed) then
-                config%cylinder%has_spacing = .true.
-                assign_simulation_key = .true.
-            end if
-        case default
-            assign_simulation_key = .false.
-        end select
-    end function assign_simulation_key
-
-    logical function assign_geometry_key(key_id, value, config)
-        character(len=*), intent(in) :: key_id, value
-        type(MeshConfig), intent(inout) :: config
-        real(c_double) :: temp_vec(3)
-        logical :: parsed
-
-        assign_geometry_key = .false.
-        select case (key_id)
-        case ("geometrystart")
-            parsed = try_parse_real_vector(value, temp_vec)
-            if (parsed) then
-                config%box%geometry_start = temp_vec
-                config%box%has_geometry_start = .true.
-                assign_geometry_key = .true.
-            end if
-        case ("geometrylength")
-            parsed = try_parse_real_vector(value, temp_vec)
-            if (parsed) then
-                config%box%geometry_length = temp_vec
-                config%box%has_geometry_length = .true.
-                assign_geometry_key = .true.
-            end if
-        case ("barreldiameter")
-            parsed = try_parse_real(value, config%cylinder%barrel_diameter)
-            if (parsed) then
-                config%cylinder%has_barrel_diameter = .true.
-                assign_geometry_key = .true.
-            end if
-        case ("innerdiameter")
-            parsed = try_parse_real(value, config%cylinder%inner_diameter)
-            if (parsed) then
-                config%cylinder%has_inner_diameter = .true.
-                assign_geometry_key = .true.
-            end if
-        case ("barrellength")
-            parsed = try_parse_real(value, config%cylinder%barrel_length)
-            if (parsed) then
-                config%cylinder%has_barrel_length = .true.
-                assign_geometry_key = .true.
-            end if
-        case ("axialstartposition")
-            parsed = try_parse_real(value, config%cylinder%axial_start)
-            if (parsed) then
-                config%cylinder%has_axial_start = .true.
-                assign_geometry_key = .true.
-            end if
-        case default
-            assign_geometry_key = .false.
-        end select
-    end function assign_geometry_key
-
-    subroutine set_mesh_type(config, raw_value)
-        type(MeshConfig), intent(inout) :: config
-        character(len=*), intent(in) :: raw_value
-        character(len=64) :: token
-
-        token = lowercase(trim(raw_value))
-        select case (trim(token))
-        case ("box")
-            config%mesh_type = "Box"
-        case ("hollowcylinder")
-            config%mesh_type = "HollowCylinder"
-        case default
-            config%mesh_type = trim(raw_value)
-        end select
-    end subroutine set_mesh_type
-
-    logical function try_parse_real(str, result_value)
-        character(len=*), intent(in) :: str
-        real(c_double), intent(out) :: result_value
-        integer :: ios
-
-        read(str, *, iostat=ios) result_value
-        try_parse_real = (ios == 0)
-    end function try_parse_real
-
-    logical function try_parse_real_vector(str, values)
-        character(len=*), intent(in) :: str
-        real(c_double), intent(out) :: values(:)
-        character(len=512) :: sanitized
-        integer :: ios, idx
-
-        sanitized = str
-        do idx = 1, len(sanitized)
-            if (sanitized(idx:idx) == ",") sanitized(idx:idx) = " "
-        end do
-        read(sanitized, *, iostat=ios) values
-        try_parse_real_vector = (ios == 0)
-    end function try_parse_real_vector
-
-    subroutine parse_section_name(line, section)
-        character(len=*), intent(in) :: line
-        character(len=*), intent(inout) :: section
-        integer :: close_idx
-
-        close_idx = index(line, "]")
-        if (close_idx > 2) then
-            section = trim(line(2:close_idx - 1))
-        else
-            section = ""
-        end if
-    end subroutine parse_section_name
-
-    pure function lowercase(str) result(out)
-        character(len=*), intent(in) :: str
-        character(len=len(str)) :: out
-        integer :: idx, code
-
-        do idx = 1, len(str)
-            code = iachar(str(idx:idx))
-            if (code >= iachar('A') .and. code <= iachar('Z')) then
-                out(idx:idx) = achar(code + 32)
-            else
-                out(idx:idx) = str(idx:idx)
-            end if
-        end do
-    end function lowercase
-
     subroutine recompute_knpr_from_connectivity(kvert, knpr, boundary_faces)
         integer(c_int), intent(in) :: kvert(:, :)
         integer(c_int), intent(inout) :: knpr(:)
@@ -455,8 +163,9 @@ contains
         deallocate(face_vertices, face_keys, face_order, boundary_face, face_elem, face_local)
     end subroutine recompute_knpr_from_connectivity
 
-    subroutine classify_hollowcylinder_boundaries(config, coords, kvert, knpr, boundary_faces, classification)
+    subroutine classify_hollowcylinder_boundaries(config, process, coords, kvert, knpr, boundary_faces, classification)
         type(MeshConfig), intent(in) :: config
+        type(ProcessParameters), intent(in) :: process
         real(c_double), intent(in) :: coords(:, :)
         integer(c_int), intent(in) :: kvert(:, :)
         integer(c_int), intent(in) :: knpr(:)
@@ -466,11 +175,13 @@ contains
         real(c_double) :: outer_radius, inner_radius, axial_min, axial_max
         logical :: have_outer, have_inner, have_axial_min, have_axial_max
         integer :: face_count
-        integer :: face_idx, node_idx
+        integer :: face_idx
         integer :: node_ids(4)
-        real(c_double) :: radial, axial
         logical, allocatable :: face_is_outer(:), face_is_inner(:)
         logical, allocatable :: face_is_axial_min(:), face_is_axial_max(:)
+        integer, allocatable :: face_category(:)
+        real(c_double), allocatable :: face_normals(:, :)
+        logical, allocatable :: inflow_face_mask(:)
 
         classification%min_edge_length = compute_min_edge_length(coords, kvert)
         classification%tolerance = 0.90_c_double * classification%min_edge_length
@@ -505,13 +216,20 @@ contains
         allocate(face_is_inner(face_count))
         allocate(face_is_axial_min(face_count))
         allocate(face_is_axial_max(face_count))
+        allocate(face_category(face_count))
+        allocate(face_normals(3, face_count))
+        allocate(inflow_face_mask(face_count))
         face_is_outer = .false.
         face_is_inner = .false.
         face_is_axial_min = .false.
         face_is_axial_max = .false.
+        face_category = 0
+        face_normals = 0.0_c_double
+        inflow_face_mask = .false.
 
         do face_idx = 1, face_count
             call gather_face_vertices(boundary_faces%elements(face_idx), boundary_faces%face_ids(face_idx), kvert, node_ids)
+            face_normals(:, face_idx) = compute_face_normal(coords, node_ids)
             if (have_outer) then
                 face_is_outer(face_idx) = check_all_vertices_on_radius(coords, node_ids, outer_radius, &
                     classification%tolerance)
@@ -536,7 +254,20 @@ contains
             else
                 face_is_axial_max(face_idx) = .false.
             end if
+            if (face_is_outer(face_idx)) then
+                face_category(face_idx) = 1
+            else if (face_is_inner(face_idx)) then
+                face_category(face_idx) = 2
+            else if (face_is_axial_min(face_idx)) then
+                face_category(face_idx) = 3
+            else if (face_is_axial_max(face_idx)) then
+                face_category(face_idx) = 4
+            end if
         end do
+
+        call assign_cylinder_inflows(process, coords, kvert, boundary_faces, face_category, face_normals, &
+            face_is_outer, face_is_inner, face_is_axial_min, face_is_axial_max, inflow_face_mask, classification, &
+            classification%tolerance)
 
         if (have_outer) then
             call subset_face_list(boundary_faces, face_is_outer, classification%cyl_outer_faces)
@@ -559,11 +290,13 @@ contains
             face_is_axial_max), classification%all_boundary_faces)
         call collect_nodes_from_face_list(classification%all_boundary_faces, coords, kvert, classification%inner_wall_nodes)
 
-        deallocate(face_is_outer, face_is_inner, face_is_axial_min, face_is_axial_max)
+        deallocate(face_is_outer, face_is_inner, face_is_axial_min, face_is_axial_max, face_category, face_normals, &
+            inflow_face_mask)
     end subroutine classify_hollowcylinder_boundaries
 
-    subroutine classify_box_boundaries(config, coords, kvert, knpr, boundary_faces, classification)
+    subroutine classify_box_boundaries(config, process, coords, kvert, knpr, boundary_faces, classification)
         type(MeshConfig), intent(in) :: config
+        type(ProcessParameters), intent(in) :: process
         real(c_double), intent(in) :: coords(:, :)
         integer(c_int), intent(in) :: kvert(:, :)
         integer(c_int), intent(in) :: knpr(:)
@@ -577,6 +310,9 @@ contains
         integer :: face_idx
         integer :: node_ids(4)
         logical, allocatable :: face_flags(:, :)
+        integer, allocatable :: face_planes(:)
+        logical, allocatable :: inflow_face_mask(:)
+        real(c_double), allocatable :: face_normals(:, :)
 
         classification%min_edge_length = compute_min_edge_length(coords, kvert)
         classification%tolerance = 0.5_c_double * classification%min_edge_length
@@ -595,6 +331,7 @@ contains
         call init_face_list(classification%z_min_faces)
         call init_face_list(classification%z_max_faces)
         call init_face_list(classification%all_boundary_faces)
+        if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
         if (classification%total_boundary_nodes == 0) return
 
         have_start = config%box%has_geometry_start
@@ -612,29 +349,45 @@ contains
             start(3), start(3) + lengths(3)]
 
         allocate(face_flags(6, face_count))
+        allocate(face_planes(face_count))
+        allocate(inflow_face_mask(face_count))
+        allocate(face_normals(3, face_count))
         face_flags = .false.
+        face_planes = 0
+        inflow_face_mask = .false.
+        face_normals = 0.0_c_double
 
         do face_idx = 1, face_count
             call gather_face_vertices(boundary_faces%elements(face_idx), boundary_faces%face_ids(face_idx), kvert, node_ids)
+            face_normals(:, face_idx) = compute_face_normal(coords, node_ids)
             if (check_all_vertices_on_plane(coords, node_ids, 1, plane_values(1), classification%tolerance)) then
                 face_flags(1, face_idx) = .true.
+                if (face_planes(face_idx) == 0) face_planes(face_idx) = 1
             end if
             if (check_all_vertices_on_plane(coords, node_ids, 1, plane_values(2), classification%tolerance)) then
                 face_flags(2, face_idx) = .true.
+                if (face_planes(face_idx) == 0) face_planes(face_idx) = 2
             end if
             if (check_all_vertices_on_plane(coords, node_ids, 2, plane_values(3), classification%tolerance)) then
                 face_flags(3, face_idx) = .true.
+                if (face_planes(face_idx) == 0) face_planes(face_idx) = 3
             end if
             if (check_all_vertices_on_plane(coords, node_ids, 2, plane_values(4), classification%tolerance)) then
                 face_flags(4, face_idx) = .true.
+                if (face_planes(face_idx) == 0) face_planes(face_idx) = 4
             end if
             if (check_all_vertices_on_plane(coords, node_ids, 3, plane_values(5), classification%tolerance)) then
                 face_flags(5, face_idx) = .true.
+                if (face_planes(face_idx) == 0) face_planes(face_idx) = 5
             end if
             if (check_all_vertices_on_plane(coords, node_ids, 3, plane_values(6), classification%tolerance)) then
                 face_flags(6, face_idx) = .true.
+                if (face_planes(face_idx) == 0) face_planes(face_idx) = 6
             end if
         end do
+
+        call assign_box_inflows(process, coords, kvert, boundary_faces, face_planes, face_flags, inflow_face_mask, &
+            face_normals, classification, classification%tolerance)
 
         call subset_face_list(boundary_faces, face_flags(1, :), classification%x_min_faces)
         call subset_face_list(boundary_faces, face_flags(2, :), classification%x_max_faces)
@@ -649,12 +402,265 @@ contains
         call collect_nodes_from_face_list(classification%z_min_faces, coords, kvert, classification%z_min_nodes)
         call collect_nodes_from_face_list(classification%z_max_faces, coords, kvert, classification%z_max_nodes)
 
-        call subset_face_list(boundary_faces, .not.(face_flags(1, :) .or. face_flags(2, :) .or. face_flags(3, :) .or. &
-            face_flags(4, :) .or. face_flags(5, :) .or. face_flags(6, :)), classification%all_boundary_faces)
+        call subset_face_list(boundary_faces, face_planes == 0, classification%all_boundary_faces)
         call collect_nodes_from_face_list(classification%all_boundary_faces, coords, kvert, classification%inner_wall_nodes)
 
         deallocate(face_flags)
+        deallocate(face_planes)
+        deallocate(inflow_face_mask)
+        deallocate(face_normals)
     end subroutine classify_box_boundaries
+
+    subroutine assign_box_inflows(process, coords, kvert, boundary_faces, face_planes, face_flags, inflow_face_mask, &
+            face_normals, classification, tolerance)
+        type(ProcessParameters), intent(in) :: process
+        real(c_double), intent(in) :: coords(:, :)
+        integer(c_int), intent(in) :: kvert(:, :)
+        type(FaceList), intent(in) :: boundary_faces
+        integer, intent(in) :: face_planes(:)
+        logical, intent(inout) :: face_flags(:, :)
+        logical, intent(inout) :: inflow_face_mask(:)
+        real(c_double), intent(in) :: face_normals(:, :)
+        type(BoxBoundaryClassification), intent(inout) :: classification
+        real(c_double), intent(in) :: tolerance
+
+        integer :: face_count, inflow_idx, face_idx, inflow_count
+        logical, allocatable :: mask(:)
+        integer :: node_ids(4)
+        real(c_double) :: eps
+
+        face_count = boundary_faces%count
+        if (face_count /= size(face_planes)) return
+        if (size(face_flags, 2) /= face_count) return
+        if (size(inflow_face_mask) /= face_count) return
+
+        if (.not. process%loaded .or. process%nOfInflows <= 0) then
+            if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
+            allocate(classification%inflow_groups(0))
+            return
+        end if
+        if (.not. allocated(process%inflows)) then
+            if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
+            allocate(classification%inflow_groups(0))
+            return
+        end if
+
+        inflow_count = min(process%nOfInflows, size(process%inflows))
+        if (inflow_count <= 0) then
+            if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
+            allocate(classification%inflow_groups(0))
+            return
+        end if
+
+        if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
+        allocate(classification%inflow_groups(inflow_count))
+        allocate(mask(face_count))
+        eps = max(tolerance, 1.0e-12_c_double)
+
+        do inflow_idx = 1, inflow_count
+            call init_face_list(classification%inflow_groups(inflow_idx)%faces)
+            call allocate_zero_length_list(classification%inflow_groups(inflow_idx)%nodes)
+            classification%inflow_groups(inflow_idx)%inflow_index = inflow_idx
+            classification%inflow_groups(inflow_idx)%inflow_type = process%inflows(inflow_idx)%type_id
+            classification%inflow_groups(inflow_idx)%label = process%inflows(inflow_idx)%type_label
+        end do
+
+        do inflow_idx = 1, inflow_count
+            mask = .false.
+            do face_idx = 1, face_count
+                if (face_planes(face_idx) == 0) cycle
+                if (inflow_face_mask(face_idx)) cycle
+                call gather_face_vertices(boundary_faces%elements(face_idx), boundary_faces%face_ids(face_idx), kvert, node_ids)
+                if (face_matches_inflow(process%inflows(inflow_idx), coords, node_ids, face_normals(:, face_idx), eps)) then
+                    mask(face_idx) = .true.
+                    inflow_face_mask(face_idx) = .true.
+                    face_flags(:, face_idx) = .false.
+                end if
+            end do
+            call subset_face_list(boundary_faces, mask, classification%inflow_groups(inflow_idx)%faces)
+            call collect_nodes_from_face_list(classification%inflow_groups(inflow_idx)%faces, coords, kvert, &
+                classification%inflow_groups(inflow_idx)%nodes)
+        end do
+
+        deallocate(mask)
+    end subroutine assign_box_inflows
+
+    subroutine assign_cylinder_inflows(process, coords, kvert, boundary_faces, face_category, face_normals, &
+            face_is_outer, face_is_inner, face_is_axial_min, face_is_axial_max, inflow_face_mask, classification, &
+            tolerance)
+        type(ProcessParameters), intent(in) :: process
+        real(c_double), intent(in) :: coords(:, :)
+        integer(c_int), intent(in) :: kvert(:, :)
+        type(FaceList), intent(in) :: boundary_faces
+        integer, intent(inout) :: face_category(:)
+        real(c_double), intent(in) :: face_normals(:, :)
+        logical, intent(inout) :: face_is_outer(:), face_is_inner(:)
+        logical, intent(inout) :: face_is_axial_min(:), face_is_axial_max(:)
+        logical, intent(inout) :: inflow_face_mask(:)
+        type(HollowCylinderBoundaryClassification), intent(inout) :: classification
+        real(c_double), intent(in) :: tolerance
+
+        integer :: face_count, inflow_idx, face_idx, inflow_count
+        logical, allocatable :: mask(:)
+        integer :: node_ids(4)
+        real(c_double) :: eps
+
+        face_count = boundary_faces%count
+        if (face_count /= size(face_category)) return
+        if (size(face_normals, 2) /= face_count) return
+        if (size(inflow_face_mask) /= face_count) return
+
+        if (.not. process%loaded .or. process%nOfInflows <= 0) then
+            if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
+            allocate(classification%inflow_groups(0))
+            return
+        end if
+        if (.not. allocated(process%inflows)) then
+            if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
+            allocate(classification%inflow_groups(0))
+            return
+        end if
+
+        inflow_count = min(process%nOfInflows, size(process%inflows))
+        if (inflow_count <= 0) then
+            if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
+            allocate(classification%inflow_groups(0))
+            return
+        end if
+
+        if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
+        allocate(classification%inflow_groups(inflow_count))
+        allocate(mask(face_count))
+        eps = max(tolerance, 1.0e-12_c_double)
+
+        do inflow_idx = 1, inflow_count
+            call init_face_list(classification%inflow_groups(inflow_idx)%faces)
+            call allocate_zero_length_list(classification%inflow_groups(inflow_idx)%nodes)
+            classification%inflow_groups(inflow_idx)%inflow_index = inflow_idx
+            classification%inflow_groups(inflow_idx)%inflow_type = process%inflows(inflow_idx)%type_id
+            classification%inflow_groups(inflow_idx)%label = process%inflows(inflow_idx)%type_label
+        end do
+
+        do inflow_idx = 1, inflow_count
+            mask = .false.
+            do face_idx = 1, face_count
+                if (face_category(face_idx) == 0) cycle
+                if (inflow_face_mask(face_idx)) cycle
+                call gather_face_vertices(boundary_faces%elements(face_idx), boundary_faces%face_ids(face_idx), kvert, node_ids)
+                if (face_matches_inflow(process%inflows(inflow_idx), coords, node_ids, face_normals(:, face_idx), eps)) then
+                    mask(face_idx) = .true.
+                    inflow_face_mask(face_idx) = .true.
+                    select case (face_category(face_idx))
+                    case (1)
+                        face_is_outer(face_idx) = .false.
+                    case (2)
+                        face_is_inner(face_idx) = .false.
+                    case (3)
+                        face_is_axial_min(face_idx) = .false.
+                    case (4)
+                        face_is_axial_max(face_idx) = .false.
+                    end select
+                    face_category(face_idx) = 0
+                end if
+            end do
+            call subset_face_list(boundary_faces, mask, classification%inflow_groups(inflow_idx)%faces)
+            call collect_nodes_from_face_list(classification%inflow_groups(inflow_idx)%faces, coords, kvert, &
+                classification%inflow_groups(inflow_idx)%nodes)
+        end do
+
+        deallocate(mask)
+    end subroutine assign_cylinder_inflows
+
+    logical function face_matches_inflow(inflow, coords, node_ids, face_normal, eps) result(matches)
+        type(ProcessInflow), intent(in) :: inflow
+        real(c_double), intent(in) :: coords(:, :)
+        integer, intent(in) :: node_ids(:)
+        real(c_double), intent(in) :: face_normal(3)
+        real(c_double), intent(in) :: eps
+
+        integer :: idx, vid
+        real(c_double) :: point(3)
+
+        matches = .false.
+        do idx = 1, size(node_ids)
+            vid = node_ids(idx)
+            point = coords(:, vid)
+            if (vertex_matches_inflow(inflow, point, face_normal, eps)) then
+                matches = .true.
+                return
+            end if
+        end do
+    end function face_matches_inflow
+
+    logical function vertex_matches_inflow(inflow, point, face_normal, eps) result(is_inside)
+        type(ProcessInflow), intent(in) :: inflow
+        real(c_double), intent(in) :: point(3)
+        real(c_double), intent(in) :: face_normal(3)
+        real(c_double), intent(in) :: eps
+
+        real(c_double) :: dist, vec_p(3), vec_a(3), vec_b(3), mirrored(3)
+        real(c_double) :: dAux1, dAux2, dAdC, dBdC, dPdA, dPdB, radius
+        real(c_double) :: normal_norm, inflow_norm, dotval
+        logical :: orientation_ok, condition_met
+
+        is_inside = .false.
+        orientation_ok = .false.
+        normal_norm = norm2_vec(face_normal)
+        inflow_norm = 0.0_c_double
+        if (inflow%has_normal) inflow_norm = norm2_vec(inflow%normal)
+        if (normal_norm > 0.0_c_double .and. inflow_norm > 0.0_c_double) then
+            dotval = abs(dot_product(face_normal / normal_norm, inflow%normal / inflow_norm))
+            orientation_ok = (dotval > 0.99_c_double)
+        end if
+        if (.not. orientation_ok) return
+
+        select case (inflow%type_id)
+        case (1, 3, 4)
+            if (.not.(inflow%has_center .and. inflow%has_outer_radius)) return
+            vec_p = point - inflow%center
+            dist = norm2_vec(vec_p)
+            if (dist <= inflow%outer_radius + eps) is_inside = .true.
+        case (2)
+            if (.not.(inflow%has_center .and. inflow%has_outer_radius .and. inflow%has_inner_radius)) return
+            vec_p = point - inflow%center
+            dist = norm2_vec(vec_p)
+            if (dist <= inflow%outer_radius + eps .and. dist >= inflow%inner_radius - eps) is_inside = .true.
+        case (5)
+            if (.not.(inflow%has_center .and. inflow%has_midpoint_a .and. inflow%has_midpoint_b)) return
+            vec_p = point - inflow%center
+            vec_a = inflow%midpoint_a - inflow%center
+            vec_b = inflow%midpoint_b - inflow%center
+            dAux1 = dot_product(vec_a, vec_a)**2 - dot_product(vec_p, vec_a)**2 + eps
+            dAux2 = dot_product(vec_b, vec_b)**2 - dot_product(vec_p, vec_b)**2 + eps
+            if (dAux1 >= 0.0_c_double .and. dAux2 >= 0.0_c_double) is_inside = .true.
+        case (6)
+            if (.not.(inflow%has_center .and. inflow%has_midpoint_a .and. inflow%has_midpoint_b)) return
+            vec_a = inflow%midpoint_a - inflow%center
+            vec_b = inflow%midpoint_b - inflow%center
+            vec_p = point - inflow%center
+            dAdC = dot_product(vec_a, vec_a)
+            dBdC = dot_product(vec_b, vec_b)
+            dPdA = dot_product(vec_p, vec_a)
+            dPdB = dot_product(vec_p, vec_b)
+            radius = norm2_vec(vec_b)
+            condition_met = (dPdA**2 <= dAdC**2 + eps) .and. (dPdB**2 <= dBdC**2 + eps)
+            if (.not. condition_met) then
+                condition_met = (dPdA >= dAdC) .and. (norm2_vec(point - inflow%midpoint_a) <= radius + eps)
+            end if
+            if (.not. condition_met) then
+                mirrored = 2.0_c_double * inflow%center - inflow%midpoint_a
+                condition_met = (dPdA**2 >= dAdC**2) .and. (norm2_vec(point - mirrored) <= radius + eps)
+            end if
+            if (condition_met) is_inside = .true.
+        case default
+            return
+        end select
+    end function vertex_matches_inflow
+
+    real(c_double) function norm2_vec(vec)
+        real(c_double), intent(in) :: vec(:)
+        norm2_vec = sqrt(sum(vec * vec))
+    end function norm2_vec
 
     real(c_double) function compute_min_edge_length(coords, kvert) result(min_len)
         real(c_double), intent(in) :: coords(:, :)
@@ -773,6 +779,32 @@ contains
             node_ids(i) = int(kvert(hexahedron_faces(i, face_idx), elem_idx))
         end do
     end subroutine gather_face_vertices
+
+    function compute_face_normal(coords, node_ids) result(normal)
+        real(c_double), intent(in) :: coords(:, :)
+        integer, intent(in) :: node_ids(:)
+        real(c_double) :: normal(3)
+        real(c_double) :: vec_a(3), vec_b(3)
+        real(c_double) :: length
+
+        if (size(node_ids) < 3) then
+            normal = 0.0_c_double
+            return
+        end if
+        vec_a = coords(:, node_ids(2)) - coords(:, node_ids(1))
+        vec_b = coords(:, node_ids(3)) - coords(:, node_ids(1))
+        normal = cross_product(vec_a, vec_b)
+        length = norm2_vec(normal)
+        if (length > 0.0_c_double) normal = normal / length
+    end function compute_face_normal
+
+    pure function cross_product(a, b) result(c)
+        real(c_double), intent(in) :: a(3), b(3)
+        real(c_double) :: c(3)
+        c(1) = a(2) * b(3) - a(3) * b(2)
+        c(2) = a(3) * b(1) - a(1) * b(3)
+        c(3) = a(1) * b(2) - a(2) * b(1)
+    end function cross_product
 
     subroutine compute_face_center(coords, node_ids, center)
         real(c_double), intent(in) :: coords(:, :)

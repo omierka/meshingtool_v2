@@ -2,9 +2,10 @@ program fortran_cgal_demo
     use iso_c_binding, only: c_ptr, c_null_char, c_associated, c_size_t, c_double, c_int, c_char
     use iso_fortran_env, only: output_unit
     use mpi
-    use bc_treatment, only: MeshConfig, initialize_mesh_config, load_mesh_config, log_mesh_config, &
-        recompute_knpr_from_connectivity, HollowCylinderBoundaryClassification, classify_hollowcylinder_boundaries, &
-        BoxBoundaryClassification, classify_box_boundaries, FaceList
+    use bc_treatment, only: recompute_knpr_from_connectivity, HollowCylinderBoundaryClassification, &
+        classify_hollowcylinder_boundaries, BoxBoundaryClassification, classify_box_boundaries, FaceList
+    use setupe3dfile_reader, only: MeshConfig, initialize_mesh_config, load_mesh_config, log_mesh_config, &
+        ProcessParameters, initialize_process_parameters, load_process_parameters, log_process_inflows
     implicit none
 
     interface
@@ -144,6 +145,7 @@ program fortran_cgal_demo
     character(len=512) :: filtered_hex_file = "Filtered.tri"
     character(len=512) :: filtered_vtu_file = "Filtered.vtu"
     type(MeshConfig) :: mesh_config
+    type(ProcessParameters) :: process_params
     type(HollowCylinderBoundaryClassification) :: hc_boundary
     type(BoxBoundaryClassification) :: box_boundary
     type(FaceList) :: boundary_faces
@@ -162,6 +164,7 @@ program fortran_cgal_demo
     output_folder= "."
     config_file = ""
     call initialize_mesh_config(mesh_config)
+    call initialize_process_parameters(process_params)
     hc_summary_ready = .false.
     box_summary_ready = .false.
     meshdir_file_count = 0
@@ -189,6 +192,8 @@ program fortran_cgal_demo
     if (len_trim(config_file) > 0) then
         call load_mesh_config(trim(config_file), mesh_config)
         if (is_master) call log_mesh_config(mesh_config)
+        call load_process_parameters(trim(config_file), process_params)
+        if (is_master) call log_process_inflows(process_params)
     end if
 
     c_path = to_c_string(trim(surface_file))
@@ -350,12 +355,13 @@ program fortran_cgal_demo
         if (mesh_config%loaded) then
             select case (trim(mesh_config%mesh_type))
             case ("HollowCylinder")
-                call classify_hollowcylinder_boundaries(mesh_config, filtered_coords, filtered_kvert, filtered_knpr, &
-                    boundary_faces, hc_boundary)
+                call classify_hollowcylinder_boundaries(mesh_config, process_params, filtered_coords, filtered_kvert, &
+                    filtered_knpr, boundary_faces, hc_boundary)
                 hc_summary_ready = .true.
                 call write_hc_parametrizations(mesh_output_folder, hc_boundary, meshdir_files, meshdir_file_count)
             case ("Box")
-                call classify_box_boundaries(mesh_config, filtered_coords, filtered_kvert, filtered_knpr, boundary_faces, &
+                call classify_box_boundaries(mesh_config, process_params, filtered_coords, filtered_kvert, filtered_knpr, &
+                    boundary_faces, &
                     box_boundary)
                 box_summary_ready = .true.
                 call write_box_parametrizations(mesh_output_folder, box_boundary, meshdir_files, meshdir_file_count)
@@ -561,11 +567,15 @@ contains
     subroutine report_hollowcylinder_summary(classification)
         type(HollowCylinderBoundaryClassification), intent(in) :: classification
         integer :: count_outer, count_inner, count_zmin, count_zmax
+        integer :: inflow_count, inflow_idx
+        character(len=32) :: inflow_label
 
         count_outer = size(classification%cyl_outer_nodes)
         count_inner = size(classification%cyl_inner_nodes)
         count_zmin = size(classification%axial_min_nodes)
         count_zmax = size(classification%axial_max_nodes)
+        inflow_count = 0
+        if (allocated(classification%inflow_groups)) inflow_count = size(classification%inflow_groups)
 
         write(*,'("HC boundary tolerance=",ES12.5)') classification%tolerance
         write(*,'("HC boundary nodes: cyl_out=",I0," cyl_in=",I0," z-=",I0," z+=",I0," innerwall=",I0)') &
@@ -574,11 +584,28 @@ contains
             classification%cyl_outer_faces%count, classification%cyl_inner_faces%count, &
             classification%axial_min_faces%count, classification%axial_max_faces%count, &
             classification%all_boundary_faces%count
+        if (inflow_count > 0) then
+            write(*,'("HC inflow groups=",I0)') inflow_count
+            do inflow_idx = 1, inflow_count
+                if (len_trim(classification%inflow_groups(inflow_idx)%label) > 0) then
+                    inflow_label = trim(classification%inflow_groups(inflow_idx)%label)
+                else
+                    inflow_label = "-"
+                end if
+                write(*,'("  inflow#",I0," type=",I0," faces=",I0," nodes=",I0," label=",A)') &
+                    classification%inflow_groups(inflow_idx)%inflow_index, &
+                    classification%inflow_groups(inflow_idx)%inflow_type, &
+                    classification%inflow_groups(inflow_idx)%faces%count, &
+                    size(classification%inflow_groups(inflow_idx)%nodes), trim(inflow_label)
+            end do
+        end if
     end subroutine report_hollowcylinder_summary
 
     subroutine report_box_summary(classification)
         type(BoxBoundaryClassification), intent(in) :: classification
         integer :: count_xmin, count_xmax, count_ymin, count_ymax, count_zmin, count_zmax
+        integer :: inflow_count, inflow_idx
+        character(len=32) :: inflow_label
 
         count_xmin = size(classification%x_min_nodes)
         count_xmax = size(classification%x_max_nodes)
@@ -586,6 +613,8 @@ contains
         count_ymax = size(classification%y_max_nodes)
         count_zmin = size(classification%z_min_nodes)
         count_zmax = size(classification%z_max_nodes)
+        inflow_count = 0
+        if (allocated(classification%inflow_groups)) inflow_count = size(classification%inflow_groups)
 
         write(*,'("Box boundary tolerance=",ES12.5)') classification%tolerance
         write(*,'("Box boundary nodes: x-=",I0," x+=",I0," y-=",I0," y+=",I0," z-=",I0," z+=",I0," innerwall=",I0)') &
@@ -595,6 +624,21 @@ contains
             classification%x_min_faces%count, classification%x_max_faces%count, classification%y_min_faces%count, &
             classification%y_max_faces%count, classification%z_min_faces%count, classification%z_max_faces%count, &
             classification%all_boundary_faces%count
+        if (inflow_count > 0) then
+            write(*,'("Box inflow groups=",I0)') inflow_count
+            do inflow_idx = 1, inflow_count
+                if (len_trim(classification%inflow_groups(inflow_idx)%label) > 0) then
+                    inflow_label = trim(classification%inflow_groups(inflow_idx)%label)
+                else
+                    inflow_label = "-"
+                end if
+                write(*,'("  inflow#",I0," type=",I0," faces=",I0," nodes=",I0," label=",A)') &
+                    classification%inflow_groups(inflow_idx)%inflow_index, &
+                    classification%inflow_groups(inflow_idx)%inflow_type, &
+                    classification%inflow_groups(inflow_idx)%faces%count, &
+                    size(classification%inflow_groups(inflow_idx)%nodes), trim(inflow_label)
+            end do
+        end if
     end subroutine report_box_summary
 
     subroutine write_hc_parametrizations(folder, classification, recorded_files, record_count)
@@ -602,12 +646,23 @@ contains
         type(HollowCylinderBoundaryClassification), intent(in) :: classification
         character(len=512), allocatable, intent(inout) :: recorded_files(:)
         integer, intent(inout) :: record_count
+        integer :: inflow_idx
+        character(len=64) :: inflow_filename
+        character(len=32) :: inflow_label
 
         call write_par_file(folder, "cyl_out.par", classification%cyl_outer_nodes, "Wall", recorded_files, record_count)
         call write_par_file(folder, "cyl_in.par", classification%cyl_inner_nodes, "Wall", recorded_files, record_count)
         call write_par_file(folder, "z-.par", classification%axial_min_nodes, "Wall", recorded_files, record_count)
         call write_par_file(folder, "z+.par", classification%axial_max_nodes, "Outflow", recorded_files, record_count)
         call write_par_file(folder, "innerwall.par", classification%inner_wall_nodes, "Wall", recorded_files, record_count)
+        if (allocated(classification%inflow_groups)) then
+            do inflow_idx = 1, size(classification%inflow_groups)
+                write(inflow_filename,'("hc_inflow_",I0,".par")') classification%inflow_groups(inflow_idx)%inflow_index
+                write(inflow_label,'("Inflow-",I0)') classification%inflow_groups(inflow_idx)%inflow_index
+                call write_par_file(folder, trim(inflow_filename), classification%inflow_groups(inflow_idx)%nodes, &
+                    trim(inflow_label), recorded_files, record_count)
+            end do
+        end if
     end subroutine write_hc_parametrizations
 
     subroutine write_box_parametrizations(folder, classification, recorded_files, record_count)
@@ -615,6 +670,9 @@ contains
         type(BoxBoundaryClassification), intent(in) :: classification
         character(len=512), allocatable, intent(inout) :: recorded_files(:)
         integer, intent(inout) :: record_count
+        integer :: inflow_idx
+        character(len=64) :: inflow_filename
+        character(len=32) :: inflow_label
 
         call write_par_file(folder, "x-.par", classification%x_min_nodes, "Wall", recorded_files, record_count)
         call write_par_file(folder, "x+.par", classification%x_max_nodes, "Wall", recorded_files, record_count)
@@ -623,6 +681,14 @@ contains
         call write_par_file(folder, "z-.par", classification%z_min_nodes, "Wall", recorded_files, record_count)
         call write_par_file(folder, "z+.par", classification%z_max_nodes, "Outflow", recorded_files, record_count)
         call write_par_file(folder, "innerwall.par", classification%inner_wall_nodes, "Wall", recorded_files, record_count)
+        if (allocated(classification%inflow_groups)) then
+            do inflow_idx = 1, size(classification%inflow_groups)
+                write(inflow_filename,'("inflow_",I0,".par")') classification%inflow_groups(inflow_idx)%inflow_index
+                write(inflow_label,'("Inflow-",I0)') classification%inflow_groups(inflow_idx)%inflow_index
+                call write_par_file(folder, trim(inflow_filename), classification%inflow_groups(inflow_idx)%nodes, &
+                    trim(inflow_label), recorded_files, record_count)
+            end do
+        end if
     end subroutine write_box_parametrizations
 
     subroutine write_par_file(folder, filename, nodes, keyword, recorded_files, record_count)

@@ -86,20 +86,58 @@ if (( missing_bins != 0 )); then
 fi
 
 shopt -s nullglob
+case_paths=()
 for case_path in "${cases_dir}"/*; do
   [[ -d "${case_path}" ]] || continue
+  case_paths+=("${case_path}")
+done
+
+if (( ${#case_paths[@]} == 0 )); then
+  echo "No cases found under '${cases_dir}'" >&2
+  exit 1
+fi
+
+case_names=()
+case_name_width=0
+for case_path in "${case_paths[@]}"; do
   case_name=$(basename -- "${case_path}")
+  case_names+=("${case_name}")
+  case_len=${#case_name}
+  if (( case_len > case_name_width )); then
+    case_name_width=${case_len}
+  fi
+done
+
+time_placeholder="9999.999 [s]"
+time_column_width=${#time_placeholder}
+mindist_placeholder="mindist=999.999"
+mindist_column_width=${#mindist_placeholder}
+nel_placeholder="99,999,999"
+nel_column_width=${#nel_placeholder}
+
+for idx in "${!case_paths[@]}"; do
+  case_path="${case_paths[$idx]}"
+  case_name="${case_names[$idx]}"
   start_time=$(date +%s.%N)
-  printf "[%s]:" "${case_name}"
+  printf "[%-${case_name_width}s]:" "${case_name}"
   stage_output=""
   stage_pipe=$(mktemp)
   rm -f "${stage_pipe}"
   mkfifo "${stage_pipe}"
   "${runner}" -s -f "CASES/${case_name}" -n "${num_proc}" "${clean_flag[@]}" > "${stage_pipe}" &
   runner_pid=$!
+  mindist_value=""
   while IFS= read -r stage_line; do
+    if [[ "${stage_line}" == mindist=* ]]; then
+      mindist_value="${stage_line#mindist=}"
+      stage_output+="${stage_line}"$'\n'
+      continue
+    elif [[ "${stage_line}" == CoarseMeshSize=* ]]; then
+      stage_output+="${stage_line}"$'\n'
+      continue
+    fi
     printf "%s" "${stage_line}"
-    stage_output+="${stage_line}"
+    stage_output+="${stage_line}"$'\n'
   done < "${stage_pipe}"
   wait "${runner_pid}"
   runner_status=$?
@@ -110,7 +148,7 @@ for case_path in "${cases_dir}"/*; do
     echo "Case '${case_name}' failed" >&2
     exit 1
   fi
-  nel_summary=""
+  nel_display=""
   if (( ${#clean_flag[@]} == 0 )); then
     filtered_tri="${case_path}/Filtered.tri"
     if [[ ! -f "${filtered_tri}" ]]; then
@@ -126,9 +164,25 @@ for case_path in "${cases_dir}"/*; do
     fi
     # Extract first two integer columns as NEL and NVT counts
     read -r nel nvt _ <<<"${mesh_line}"
-    nel_summary=$(printf " :: NEL=%s NVT=%s" "${nel}" "${nvt}")
+    read -r nel_fmt nvt_fmt < <(
+      python - "$nel" "$nvt" <<'PY'
+import sys
+values = [int(v) for v in sys.argv[1:]]
+print(" ".join(f"{v:,}" for v in values))
+PY
+    )
+    nel_display=$(printf "NEL=%*s NVT=%*s" "${nel_column_width}" "${nel_fmt}" "${nel_column_width}" "${nvt_fmt}")
   fi
   end_time=$(date +%s.%N)
   elapsed_seconds=$(awk -v start="${start_time}" -v end="${end_time}" 'BEGIN { printf "%.3f", end - start }')
-  printf " :: %s [s]%s\n" "${elapsed_seconds}" "${nel_summary}"
+  time_str=$(printf "%s [s]" "${elapsed_seconds}")
+  printf " :: %${time_column_width}s" "${time_str}"
+  if (( ${#clean_flag[@]} == 0 )) && [[ -n "${mindist_value}" ]]; then
+    mindist_formatted=$(awk -v val="${mindist_value}" 'BEGIN { printf "%.3f", val }')
+    printf "  %-${mindist_column_width}s" "mindist=${mindist_formatted}"
+  fi
+  if [[ -n "${nel_display}" ]]; then
+    printf "  :: %s" "${nel_display}"
+  fi
+  printf "\n"
 done
