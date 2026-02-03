@@ -12,7 +12,7 @@ Use -n/--num-proc to forward a custom MPI process count to runner.sh (default 64
 EOF
 }
 
-num_proc="4"
+num_proc="64"
 clean_flag=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -110,7 +110,25 @@ for case_path in "${cases_dir}"/*; do
     echo "Case '${case_name}' failed" >&2
     exit 1
   fi
+  nel_summary=""
+  if (( ${#clean_flag[@]} == 0 )); then
+    filtered_tri="${case_path}/Filtered.tri"
+    if [[ ! -f "${filtered_tri}" ]]; then
+      echo
+      echo "Filtered mesh '${filtered_tri}' missing, cannot read NEL/NVT" >&2
+      exit 1
+    fi
+    mesh_line=$(grep 'NEL,NVT' "${filtered_tri}" || true)
+    if [[ -z "${mesh_line}" ]]; then
+      echo
+      echo "Unable to parse NEL/NVT markings in '${filtered_tri}'" >&2
+      exit 1
+    fi
+    # Extract first two integer columns as NEL and NVT counts
+    read -r nel nvt _ <<<"${mesh_line}"
+    nel_summary=$(printf " :: NEL=%s NVT=%s" "${nel}" "${nvt}")
+  fi
   end_time=$(date +%s.%N)
   elapsed_seconds=$(awk -v start="${start_time}" -v end="${end_time}" 'BEGIN { printf "%.3f", end - start }')
-  printf " :: %s [s]\n" "${elapsed_seconds}"
+  printf " :: %s [s]%s\n" "${elapsed_seconds}" "${nel_summary}"
 done
