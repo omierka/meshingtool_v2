@@ -52,12 +52,16 @@ namespace MeshHexer
     /// Score of this gap
     double confidence;
 
+    /// Number of bins between MIN and MAX histogram bins
+    std::uint32_t bin_span = 1;
+
     /// Constructor
-    Gap(std::size_t f, std::size_t of, double d, double c) :
+    Gap(std::size_t f, std::size_t of, double d, double c, std::uint32_t span = 1) :
       face(f),
       opposite_face(of),
       diameter(d),
-      confidence(c)
+      confidence(c),
+      bin_span(span)
     {
     }
   };

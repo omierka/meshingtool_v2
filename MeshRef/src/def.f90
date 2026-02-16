@@ -92,6 +92,7 @@ contains
     integer :: unit, ios, elem
     real(rk) :: value
     logical :: exists
+    character(len=128) :: label
 
     inquire(file=trim(filename), exist=exists)
     if (.not.exists) then
@@ -110,7 +111,9 @@ contains
     end if
 
     if (.not.allocated(mesh%monitor)) allocate(mesh%monitor(mesh%nel))
+    if (.not.allocated(mesh%monitor_value)) allocate(mesh%monitor_value(mesh%nel))
     mesh%monitor = 0
+    mesh%monitor_value = 0.0_rk
 
     do elem = 1, mesh%nel
        read(unit, *, iostat=ios) value
@@ -118,6 +121,7 @@ contains
           write(*, '(A,I0)') 'Insufficient monitor entries; stopping at element ', elem
           exit
        end if
+       mesh%monitor_value(elem) = value
        if (value > Monitor_threshold) then
           mesh%monitor(elem) = refinement_depth
        else
@@ -126,7 +130,8 @@ contains
     end do
     close(unit)
 
-    call report_refinement_distribution(mesh, 'No Of Elements with Refinement depth [0,1,2]')
+    write(label, '(A,I0,A)') 'No Of Elements with Refinement depth [0..', refinement_depth, ']'
+    call report_refinement_distribution(mesh, trim(label))
   end subroutine load_monitor_file
 
   subroutine vertice_marking(mesh, min_marker)
@@ -533,6 +538,23 @@ contains
     end do
 
   end subroutine fill_up_element
+
+  subroutine mark_elements_by_threshold(mesh, level, threshold_value)
+    type(mesh_type), intent(inout) :: mesh
+    integer, intent(in) :: level
+    real(rk), intent(in) :: threshold_value
+    integer :: elem, max_elem
+
+    if (.not.allocated(mesh%monitor)) return
+    if (.not.allocated(mesh%monitor_value)) return
+    max_elem = min(size(mesh%monitor), size(mesh%monitor_value))
+
+    do elem = 1, max_elem
+       if (mesh%monitor_value(elem) > threshold_value) then
+          if (mesh%monitor(elem) < level) mesh%monitor(elem) = level
+       end if
+    end do
+  end subroutine mark_elements_by_threshold
 
   subroutine enforce_refinement_levels(mesh, level)
     type(mesh_type), intent(inout) :: mesh

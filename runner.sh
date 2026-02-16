@@ -76,14 +76,16 @@ module load cmake/3.28.3 gcc/latest-v13 openmpi/4.1.6 python/3.13.5
 print_stage 0
 
 # ---- compute mindist + CoarseMeshSize ----
-mindist="$(./meshhexer-cli --checkpoint-path "${FOLDER}/MINGAP.vtu" min-gap "${FOLDER}/surface.off")"
-#mindist=1.8
+read -r mindist span <<EOF
+$(./meshhexer-cli --checkpoint-path "${FOLDER}/MINGAP.vtu" min-gap "${FOLDER}/surface.off")
+EOF
 emit_info "mindist=${mindist}"
+emit_info "histogram_span=${span}"
 
 #stage[1]
 print_stage 1
 
-CoarseMeshSize="$(python -c "print(float('${mindist}')*16.0)")"
+CoarseMeshSize="$(python -c "import math; print(float('${mindist}') * 3.0 * (3 ** int('${span}')))")"
 emit_info "CoarseMeshSize=${CoarseMeshSize}"
 
 # ---- workflow ----

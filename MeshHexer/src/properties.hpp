@@ -72,6 +72,16 @@ namespace MeshHexer
 
   /// Combine MIS and normal distances into a single monitor field
   void monitor_distances(Mesh& mesh);
+  void invalidate_monitors_below(Mesh& mesh, double min_gap_diameter);
+  struct MonitorHistogramBin
+  {
+    double lower;
+    double upper;
+    double area;
+  };
+  std::vector<MonitorHistogramBin> monitor_histogram(Mesh& mesh, double min_gap_diameter);
+  double adjusted_min_gap_from_histogram(const std::vector<MonitorHistogramBin>& bins, double min_gap_diameter);
+  std::pair<std::size_t, std::size_t> monitor_histogram_min_max_indices(const std::vector<MonitorHistogramBin>& bins);
 
   std::vector<std::pair<Point2D, double>> z_depths(Mesh& mesh, AABBTree& aabb_tree);
 } // namespace MeshHexer

@@ -2,7 +2,7 @@ module var_mod
   implicit none
 
   integer, parameter :: rk = kind(1.0d0)
-  integer, parameter :: refinement_levels = 2
+  integer, parameter :: default_refinement_depth = 2
   integer :: level
   real(rk) :: Monitor_threshold = 1.5_rk
   real(rk) :: scaling_factor_TRI_output = 0.1_rk
@@ -90,6 +90,7 @@ module var_mod
      integer, allocatable     :: kvert(:,:) !! Vertex connectivities, size (8,nel)
      integer, allocatable     :: knpr(:)    !! Nodal properties, size (nvt)
      integer, allocatable     :: monitor(:) !! Element tags, size (nel)
+     real(rk), allocatable    :: monitor_value(:) !! Raw monitor values
      integer, allocatable     :: kadj(:,:)  !! Element adjacency, size (6,nel)
      type(element_span_type), allocatable :: kelementspan(:)
   end type mesh_type
@@ -136,6 +137,7 @@ contains
     if (allocated(mesh%knpr))  deallocate(mesh%knpr)
     if (allocated(mesh%kadj))  deallocate(mesh%kadj)
     if (allocated(mesh%monitor)) deallocate(mesh%monitor)
+    if (allocated(mesh%monitor_value)) deallocate(mesh%monitor_value)
     if (allocated(mesh%kelementspan)) then
        call release_element_span(mesh%kelementspan)
        deallocate(mesh%kelementspan)

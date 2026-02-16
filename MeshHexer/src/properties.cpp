@@ -669,6 +669,150 @@ namespace MeshHexer
     }
   }
 
+  std::vector<MonitorHistogramBin> monitor_histogram(Mesh& mesh, double min_gap_diameter)
+  {
+    std::vector<MonitorHistogramBin> result;
+
+    auto maybe_monitor = mesh.property_map<FaceIndex, double>("f:Monitor");
+    if(!maybe_monitor.has_value() || min_gap_diameter <= 0.0)
+    {
+      return result;
+    }
+
+    Mesh::Property_map<FaceIndex, double> monitor = maybe_monitor.value();
+
+    double max_monitor = 0.0;
+    for(FaceIndex f : mesh.faces())
+    {
+      max_monitor = std::max(max_monitor, monitor[f]);
+    }
+
+    if(max_monitor <= min_gap_diameter)
+    {
+      return result;
+    }
+
+    const double base = 3.0;
+    const double eps = 1e-12;
+    double lower = min_gap_diameter;
+    double upper = min_gap_diameter * base;
+
+    while(lower <= max_monitor + eps)
+    {
+      result.push_back(MonitorHistogramBin{lower, upper, 0.0});
+      lower = upper;
+      upper *= base;
+    }
+
+    for(FaceIndex f : mesh.faces())
+    {
+      double value = monitor[f];
+      if(value < min_gap_diameter)
+      {
+        continue;
+      }
+      double area = PMP::face_area(f, mesh);
+      for(MonitorHistogramBin& bin : result)
+      {
+        bool last = (&bin == &result.back());
+        if(
+          (value >= bin.lower && value < bin.upper) ||
+          (last && value <= bin.upper + eps))
+        {
+          bin.area += area;
+          break;
+        }
+      }
+    }
+
+    return result;
+  }
+
+  double adjusted_min_gap_from_histogram(const std::vector<MonitorHistogramBin>& bins, double min_gap_diameter)
+  {
+    if(bins.empty())
+    {
+      return min_gap_diameter;
+    }
+
+    constexpr double target_fraction = 0.001; // 0.1%
+    double total_area = 0.0;
+    for(const MonitorHistogramBin& bin : bins)
+    {
+      total_area += bin.area;
+    }
+
+    if(total_area == 0.0)
+    {
+      return min_gap_diameter;
+    }
+
+    double cumulative = 0.0;
+    for(const MonitorHistogramBin& bin : bins)
+    {
+      cumulative += bin.area / total_area;
+      if(cumulative >= target_fraction)
+      {
+        return bin.lower;
+      }
+    }
+
+    return bins.back().lower;
+  }
+
+  std::pair<std::size_t, std::size_t>
+  monitor_histogram_min_max_indices(const std::vector<MonitorHistogramBin>& bins)
+  {
+    if(bins.empty())
+    {
+      return {0, 0};
+    }
+
+    double total_area = 0.0;
+    for(const MonitorHistogramBin& bin : bins)
+    {
+      total_area += bin.area;
+    }
+
+    if(total_area == 0.0)
+    {
+      return {0, 0};
+    }
+
+    const double min_fraction_threshold = 0.001; // 0.1%
+    const double max_fraction_threshold = 0.66;  // 66%
+
+    std::size_t min_index = bins.size() - 1;
+    double cumulative = 0.0;
+    for(std::size_t i = 0; i < bins.size(); ++i)
+    {
+      cumulative += bins[i].area / total_area;
+      if(cumulative >= min_fraction_threshold)
+      {
+        min_index = i;
+        break;
+      }
+    }
+
+    std::size_t max_index = min_index;
+    double coverage = bins[min_index].area / total_area;
+
+    if(min_index + 1 < bins.size())
+    {
+      max_index = min_index + 1;
+      coverage += bins[max_index].area / total_area;
+    }
+
+    while(
+      max_index + 1 < bins.size() && coverage < max_fraction_threshold && (max_index - min_index) < 3)
+    {
+      ++max_index;
+      coverage += bins[max_index].area / total_area;
+    }
+
+    return {min_index, max_index};
+  }
+
   void topological_distances(Mesh& mesh, const std::string& targets_property, double max_distance)
   {
     // Get targets
@@ -1124,10 +1268,6 @@ namespace MeshHexer
         minimum = diameters[f];
       }
     }
-
-    // Refresh monitor field and invalidate any values below the global min-gap
-    monitor_distances(mesh);
-    invalidate_monitors_below(mesh, minimum);
 
     return {gap_face, ids[gap_face], diameters[gap_face], scores[gap_face]};
   }

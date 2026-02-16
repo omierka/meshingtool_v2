@@ -35,12 +35,13 @@ namespace MeshHexerCLI
       if(verbose)
       {
         std::cout << "Min-gap of " << min_gap.diameter << " between faces " << min_gap.face << " and " << min_gap.opposite_face << "\n";
+        std::cout << "Histogram span (bins): " << min_gap.bin_span << "\n";
         std::cout << "Use `SelectIDs(IDs=[0, " << min_gap.face << ", 0, " << min_gap.opposite_face
               << "], FieldType='CELL')` to select the chosen triangles in ParaView\n";
       }
       else
       {
-        std::cout << min_gap.diameter << "\n";
+        std::cout << min_gap.diameter << " " << min_gap.bin_span << "\n";
       }
     }
 

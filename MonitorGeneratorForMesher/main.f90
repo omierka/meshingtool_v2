@@ -40,16 +40,17 @@ program demo
   integer, allocatable :: local_elem_indices(:)
   real(dp), allocatable :: hex_mis_local(:)
   real(dp), allocatable :: hex_surface_local(:)
-  integer :: elem_min, elem_max, n_active, range_idx
+  integer :: elem_min, elem_max, n_active, range_idx, global_idx
   integer :: local_elem_min, local_elem_max, local_n_active
   integer :: tri_pos, tri_id, num_triangles_elem
   real(dp) :: triA(3), triB(3), triC(3)
   real(dp) :: mis_val
   real(dp) :: area_val
-  real(dp) :: elem_mis, elem_surface,dMinGap
+  real(dp) :: elem_mis, elem_surface, dMinGap, max_mis_assigned
   logical :: element_reported
   logical :: triangle_reported
   logical :: stage_finished
+  logical :: elem_has_mis, has_global_mis
   character(len=512) :: hex_file, tri_file, arg, cMinGap, output_folder
   integer :: nargs, argi
   logical :: verbose
@@ -66,6 +67,7 @@ program demo
   real(dp) :: t_out_start, t_out_elapsed, t_out_max
   type tMonitor
    real(dp), allocatable :: MIS(:),AREA(:),aux(:)
+   integer, allocatable :: MIS_flag(:), flag_aux(:)
   end type
   type(tMonitor) :: Monitor
   integer :: ierr_comm
@@ -178,8 +180,11 @@ program demo
   end if
 
   allocate(Monitor%MIS(nel_hex),Monitor%AREA(nel_hex),Monitor%aux(nel_hex))
+  allocate(Monitor%MIS_flag(nel_hex), Monitor%flag_aux(nel_hex))
   Monitor%MIS = 0.0_dp
   Monitor%AREA = 0.0_dp
+  Monitor%MIS_flag = 0
+  Monitor%flag_aux = 0
 
   if (elem_min < 1) elem_min = 1
   if (elem_max > nel_hex) elem_max = nel_hex
@@ -352,7 +357,8 @@ program demo
   do while (.not. stage_finished)
     if (elem <= local_elem_max) then
       elem_surface = 0.0_dp
-      elem_mis = 1d8
+      elem_mis = huge(1.0_dp)
+      elem_has_mis = .false.
       range_idx = elem - local_elem_min + 1
       do j = 1, 8
         Hex(:, j) = dcorvg_hex(:, kvert_hex(j, elem))
@@ -398,6 +404,7 @@ program demo
                 nconn = nX_tmp(t)
                 int_types(cellIdx) = 7
                 mis_val = MIS_diameter(tri_id)
+                elem_has_mis = .true.
                 if (mis_val < elem_mis) elem_mis = mis_val
                 area_val = polygon_area(X_tmp(:,:,t), nX_tmp(t))
                 elem_surface = elem_surface + area_val
@@ -414,14 +421,17 @@ program demo
         end if
       end if
       if (range_idx >= 1 .and. range_idx <= local_n_active) then
-        if (elem_mis < 0.0_dp) then
-          hex_mis_local(range_idx) = 0.0_dp
-          Monitor%MIS(local_elem_min + range_idx - 1) = 0.0_dp
-        else
+        global_idx = local_elem_min + range_idx - 1
+        if (elem_has_mis) then
           hex_mis_local(range_idx) = elem_mis
-          Monitor%MIS(local_elem_min + range_idx - 1) = elem_mis
+          Monitor%MIS(global_idx) = elem_mis
+          Monitor%MIS_flag(global_idx) = 1
+        else
+          hex_mis_local(range_idx) = -1.0_dp
+          Monitor%MIS(global_idx) = 0.0_dp
+          Monitor%MIS_flag(global_idx) = 0
         end if
-        Monitor%AREA(local_elem_min + range_idx - 1) = elem_surface
+        Monitor%AREA(global_idx) = elem_surface
       end if
       local_out_done = local_out_done + 1
 !      write(*,*) 'EL : ', elem, range_idx, elem_surface,elem_mis
@@ -437,11 +447,44 @@ program demo
   Monitor%MIS = Monitor%aux
   call MPI_Allreduce(Monitor%AREA, Monitor%aux, nel_hex, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD, ierr_comm)
   Monitor%AREA = Monitor%aux
+  call MPI_Allreduce(Monitor%MIS_flag, Monitor%flag_aux, nel_hex, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, ierr_comm)
+  Monitor%MIS_flag = Monitor%flag_aux
+
+  max_mis_assigned = -huge(1.0_dp)
+  has_global_mis = .false.
+  do i = 1, nel_hex
+    if (Monitor%MIS_flag(i) > 0) then
+      has_global_mis = .true.
+      if (Monitor%MIS(i) > max_mis_assigned) max_mis_assigned = Monitor%MIS(i)
+    end if
+  end do
+  if (has_global_mis) then
+    do i = 1, nel_hex
+      if (Monitor%MIS_flag(i) == 0) then
+        Monitor%MIS(i) = max_mis_assigned
+        Monitor%MIS_flag(i) = 1
+      end if
+    end do
+  else
+    max_mis_assigned = 0.0_dp
+  end if
+
+  if (local_n_active > 0) then
+    do i = 1, local_n_active
+      global_idx = local_elem_min + i - 1
+      hex_mis_local(i) = Monitor%MIS(global_idx)
+    end do
+  end if
+
   if (mpi_rank == 0) then
     call compose_path(output_folder, 'area.txt', area_file)
     open(file=trim(area_file),unit=11)
     do i=1,nel_hex
-      write(11,'(ES12.4)') 5.0_dp*dMinGap / Monitor%MIS(i)
+      if (Monitor%MIS(i) > 0.0_dp) then
+        write(11,'(ES12.4)') 5.0_dp*dMinGap / Monitor%MIS(i)
+      else
+        write(11,'(ES12.4)') 0.0_dp
+      end if
     end do
     close(11)
   end if

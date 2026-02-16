@@ -2,13 +2,13 @@ program meshref_main
   use def_mod, only: initialize_mesh_database, finalize_mesh_database, &
                      load_target_mesh_file, build_target_element_span, mesh_refinement, random_element_marking, &
                      vertice_marking, enforce_refinement_levels, load_monitor_file, &
-                     report_refinement_distribution
+                     report_refinement_distribution, mark_elements_by_threshold
   use inout_mod, only: write_patch_group_vtu, build_clean_output_path, &
                        build_refined_clean_output_path, build_level_output_path, write_refined_clean_tri
   use cleanup_mod, only: clear_intra_patches, clear_inter_patches, write_refined_clean_vtu, &
                          update_coord_tolerance_from_patches
   use var_mod, only: element_patches, clean_element_patches, hex_mesh, initialize_mesh_levels, &
-                     bind_refined_mesh, refinement_depth
+                     bind_refined_mesh, default_refinement_depth, rk, Monitor_threshold
   implicit none
 
   character(len=1024) :: working_folder
@@ -18,29 +18,37 @@ program meshref_main
   character(len=1024) :: clean_output_vtu_path
   character(len=1024) :: refined_clean_output_vtu_path
   character(len=1024) :: monitor_file_path
-  integer, parameter :: refinement_levels = 2
+  character(len=1024) :: label
   integer :: random_percentage
+  integer :: recursion_depth
   integer :: level
+  real(rk) :: level_threshold
 
   call print_banner('MESHREF START')
-  call parse_command_line(working_folder, random_percentage)
+  recursion_depth = default_refinement_depth
+  call parse_command_line(working_folder, random_percentage, recursion_depth)
   input_mesh_path = trim(working_folder) // '/Coarse_meshDir/Mesh.tri'
   monitor_file_path = trim(working_folder) // '/area.txt'
   output_vtu_path = trim(working_folder) // '/RefinedCleanMesh.vtu'
 
   call initialize_mesh_database()
-  call initialize_mesh_levels(refinement_levels)
+  call initialize_mesh_levels(recursion_depth)
   call load_target_mesh_file(trim(input_mesh_path))
   call build_target_element_span(hex_mesh(0))
   call load_monitor_file(hex_mesh(0), trim(monitor_file_path))
   if (random_percentage >= 0) call random_element_marking(random_percentage)
-  do level = refinement_levels, 1, -1
+  level_threshold = Monitor_threshold
+  do level = recursion_depth, 1, -1
+     if (random_percentage < 0) then
+        call mark_elements_by_threshold(hex_mesh(0), level, level_threshold)
+     end if
      call enforce_refinement_levels(hex_mesh(0), level)
+     if (random_percentage < 0 .and. level > 1) level_threshold = level_threshold / 3.0_rk
   end do
-  call report_refinement_distribution(hex_mesh(0), &
-       'No Of Elements with Refinement depth [0,1,2] (smoothed)')
+  write(label, '(A,I0,A)') 'No Of Elements with Refinement depth [0..', recursion_depth, '] (smoothed)'
+  call report_refinement_distribution(hex_mesh(0), trim(label))
 
-  do level = 0, refinement_levels - 1
+  do level = 0, recursion_depth - 1
 
      if (.not.allocated(hex_mesh(level)%kelementspan)) call build_target_element_span(hex_mesh(level))
      call vertice_marking(hex_mesh(level), level+1)
@@ -72,7 +80,10 @@ program meshref_main
 
   end do
 
-  call write_refined_clean_tri(hex_mesh(refinement_levels), hex_mesh(0), trim(working_folder))
+  write(label, '(A,I0,A)') 'Final No Of Elements with Refinement depth [0..', recursion_depth, ']'
+  call report_refinement_distribution(hex_mesh(0), trim(label))
+
+  call write_refined_clean_tri(hex_mesh(recursion_depth), hex_mesh(0), trim(working_folder))
 
   call finalize_mesh_database()
   call print_banner('MESHREF END')
@@ -93,16 +104,18 @@ contains
     write(*, '(A)') line
   end subroutine print_banner
 
-  subroutine parse_command_line(working_folder, random_percentage)
-    use var_mod, only: rk, Monitor_threshold
+  subroutine parse_command_line(working_folder, random_percentage, recursion_depth)
+    use var_mod, only: rk, Monitor_threshold, default_refinement_depth
     character(len=*), intent(out) :: working_folder
     integer, intent(out) :: random_percentage
+    integer, intent(out) :: recursion_depth
     integer :: argc, idx, ios, value
     real(rk) :: threshold_value
     character(len=1024) :: arg
 
     working_folder = ''
     random_percentage = -1
+    recursion_depth = default_refinement_depth
     argc = command_argument_count()
     idx = 1
 
@@ -138,6 +151,17 @@ contains
              call print_usage('Monitor threshold must be a non-negative number.', .true.)
           end if
           Monitor_threshold = threshold_value
+       case ('-d', '--depth', '--recursion-depth')
+          if (idx == argc) then
+             call print_usage('Missing value after depth flag.', .true.)
+          end if
+          idx = idx + 1
+          call get_command_argument(idx, arg)
+          read(arg, *, iostat=ios) value
+          if (ios /= 0 .or. value < 1 .or. value > 3) then
+             call print_usage('Depth must be an integer between 1 and 3.', .true.)
+          end if
+          recursion_depth = value
        case ('-h', '--help')
           call print_usage('', .false.)
        case default
@@ -163,6 +187,7 @@ contains
     write(*, '(A)') 'Options:'
     write(*, '(A)') '  -r, --random-refinement <0-100>  Fraction of nodes flagged for refinement.'
     write(*, '(A)') '  -t, --threshold <value>          Monitor threshold (default 1.5).'
+    write(*, '(A)') '  -d, --depth <1-3>                Recursion depth (default 2).'
     write(*, '(A)') '  -h, --help                       Show this help text.'
     if (is_error) then
        stop 1

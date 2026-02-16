@@ -9,8 +9,12 @@
 #include <warnings.hpp>
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <limits>
+#include <sstream>
 #include <optional>
 #include <unistd.h>
 
@@ -46,6 +50,12 @@ namespace MeshHexer
 
     /// Cached AABBTree
     std::optional<AABBTree> _aabb_tree;
+
+    std::vector<MonitorHistogramBin> _monitor_histogram;
+    double _monitor_histogram_total_area = 0.0;
+    bool _monitor_histogram_ready = false;
+    std::size_t _monitor_hist_min_index = 0;
+    std::size_t _monitor_hist_max_index = 0;
 
   public:
     explicit SurfaceMeshImpl(Mesh&& m) : _mesh(std::move(m))
@@ -123,6 +133,7 @@ namespace MeshHexer
     }
 
     void prepare_for_min_gap();
+    void write_monitor_histogram_file(const std::filesystem::path& reference_path) const;
   };
 
   void SurfaceMesh::SurfaceMeshImpl::prepare_for_min_gap()
@@ -177,7 +188,36 @@ namespace MeshHexer
   Gap SurfaceMesh::SurfaceMeshImpl::min_gap()
   {
     prepare_for_min_gap();
-    return MeshHexer::min_gap(_mesh);
+    Gap gap = MeshHexer::min_gap(_mesh);
+
+    monitor_distances(_mesh);
+    _monitor_histogram = monitor_histogram(_mesh, gap.diameter);
+    _monitor_hist_min_index = 0;
+    _monitor_hist_max_index = 0;
+    if(!_monitor_histogram.empty())
+    {
+      auto [min_idx, max_idx] = monitor_histogram_min_max_indices(_monitor_histogram);
+      _monitor_hist_min_index = std::min(min_idx, _monitor_histogram.size() - 1);
+      _monitor_hist_max_index = std::min(max_idx, _monitor_histogram.size() - 1);
+    }
+    _monitor_histogram_total_area = 0.0;
+    for(const MonitorHistogramBin& bin : _monitor_histogram)
+    {
+      _monitor_histogram_total_area += bin.area;
+    }
+    _monitor_histogram_ready = true;
+
+    double adjusted_min = adjusted_min_gap_from_histogram(_monitor_histogram, gap.diameter);
+    gap.diameter = adjusted_min;
+
+    invalidate_monitors_below(_mesh, gap.diameter);
+
+    gap.bin_span = static_cast<std::uint32_t>((_monitor_hist_max_index >= _monitor_hist_min_index)
+                                               ? (_monitor_hist_max_index - _monitor_hist_min_index)
+                                               : 0);
+    gap.bin_span = std::max(1u, std::min(3u, gap.bin_span));
+
+    return gap;
   }
 
   VolumeMesh SurfaceMesh::SurfaceMeshImpl::fbm_mesh(const FBMMeshSettings& settings)
@@ -215,9 +255,97 @@ namespace MeshHexer
       {
         return ResultType::err("Failed to write mesh to opened file");
       }
+
+      write_monitor_histogram_file(filename);
     }
 
     return {};
+  }
+
+  void SurfaceMesh::SurfaceMeshImpl::write_monitor_histogram_file(const std::filesystem::path& reference_path) const
+  {
+    if(!_monitor_histogram_ready)
+    {
+      return;
+    }
+
+    std::filesystem::path directory = reference_path.parent_path();
+    if(directory.empty())
+    {
+      directory = ".";
+    }
+    std::filesystem::path histogram_path = directory / "size_distribution_histogram.txt";
+
+    std::ofstream out(histogram_path);
+    if(!out)
+    {
+      return;
+    }
+
+    const int width_label = 8;
+    const int width_start = 18;
+    const int width_end = 18;
+    const int width_area = 18;
+    const int width_percent = 14;
+
+    const int total_width = width_label + width_start + width_end + width_area + width_percent;
+
+    std::size_t marked_min = _monitor_hist_min_index;
+    std::size_t marked_max = _monitor_hist_max_index;
+    if(!_monitor_histogram.empty())
+    {
+      marked_min = std::min(marked_min, _monitor_histogram.size() - 1);
+      marked_max = std::min(marked_max, _monitor_histogram.size() - 1);
+    }
+    else
+    {
+      marked_min = marked_max = std::numeric_limits<std::size_t>::max();
+    }
+
+    out << std::left << std::setw(width_label) << "Mark"
+        << std::right << std::setw(width_start) << "Bin Start"
+        << std::right << std::setw(width_end) << "Bin End"
+        << std::right << std::setw(width_area) << "Area"
+        << std::right << std::setw(width_percent) << "Percentage"
+        << "\n";
+
+    out << std::string(total_width, '-') << "\n";
+
+    const auto format_value = [](double value, int precision) {
+      std::ostringstream ss;
+      ss << std::fixed << std::setprecision(precision) << value;
+      return ss.str();
+    };
+
+    for(std::size_t i = 0; i < _monitor_histogram.size(); ++i)
+    {
+      const MonitorHistogramBin& bin = _monitor_histogram[i];
+      double percentage = 0.0;
+      if(_monitor_histogram_total_area > 0.0)
+      {
+        percentage = (bin.area / _monitor_histogram_total_area) * 100.0;
+      }
+
+      std::string label;
+      if(i == marked_min && i == marked_max)
+      {
+        label = "MIN/MAX";
+      }
+      else if(i == marked_min)
+      {
+        label = "MIN";
+      }
+      else if(i == marked_max)
+      {
+        label = "MAX";
+      }
+
+      out << std::left << std::setw(width_label) << label
+          << std::right << std::setw(width_start) << format_value(bin.lower, 6)
+          << std::right << std::setw(width_end) << format_value(bin.upper, 6)
+          << std::right << std::setw(width_area) << format_value(bin.area, 6)
+          << std::right << std::setw(width_percent - 1) << format_value(percentage, 2) << "%\n";
+    }
   }
 
   BoundingBox SurfaceMesh::SurfaceMeshImpl::bounding_box() const

@@ -121,6 +121,7 @@ for idx in "${!case_paths[@]}"; do
   start_time=$(date +%s.%N)
   printf "[%-${case_name_width}s]:" "${case_name}"
   stage_output=""
+  span_value=""
   stage_pipe=$(mktemp)
   rm -f "${stage_pipe}"
   mkfifo "${stage_pipe}"
@@ -130,6 +131,10 @@ for idx in "${!case_paths[@]}"; do
   while IFS= read -r stage_line; do
     if [[ "${stage_line}" == mindist=* ]]; then
       mindist_value="${stage_line#mindist=}"
+      stage_output+="${stage_line}"$'\n'
+      continue
+    elif [[ "${stage_line}" == histogram_span=* ]]; then
+      span_value="${stage_line#histogram_span=}"
       stage_output+="${stage_line}"$'\n'
       continue
     elif [[ "${stage_line}" == CoarseMeshSize=* ]]; then
@@ -179,7 +184,11 @@ PY
   printf " :: %${time_column_width}s" "${time_str}"
   if (( ${#clean_flag[@]} == 0 )) && [[ -n "${mindist_value}" ]]; then
     mindist_formatted=$(awk -v val="${mindist_value}" 'BEGIN { printf "%.3f", val }')
-    printf "  %-${mindist_column_width}s" "mindist=${mindist_formatted}"
+    if [[ -n "${span_value}" ]]; then
+      printf "  mindist=%-${mindist_column_width}s span=%s" "${mindist_formatted}" "${span_value}"
+    else
+      printf "  %-${mindist_column_width}s" "mindist=${mindist_formatted}"
+    fi
   fi
   if [[ -n "${nel_display}" ]]; then
     printf "  :: %s" "${nel_display}"
