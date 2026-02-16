@@ -50,6 +50,14 @@ namespace MeshHexer
   public:
     explicit SurfaceMeshImpl(Mesh&& m) : _mesh(std::move(m))
     {
+      auto validity_prop = _mesh.add_property_map<FaceIndex, std::uint32_t>("f:Validity", 0);
+      if(validity_prop.second)
+      {
+        for(FaceIndex f : _mesh.faces())
+        {
+          validity_prop.first[f] = 0;
+        }
+      }
     }
 
     AABBTree& aabb_tree()
@@ -127,7 +135,10 @@ namespace MeshHexer
 
     // Ensure maximal inscribed spheres are available
     ensure_property<FaceIndex, double>("f:MIS_diameter", [&]() { maximal_inscribed_spheres(_mesh, aabb_tree()); });
-
+    ensure_property<FaceIndex, double>("f:normaldistance", [&]() { normal_distances(_mesh, aabb_tree()); });
+    ensure_property<FaceIndex, std::uint32_t>(
+      "f:normaldistance_target",
+      [&]() { normal_distances(_mesh, aabb_tree()); });
     // Calculate maximum search distances for topological distances
 
     Mesh::Property_map<FaceIndex, double> max_distances =
@@ -148,6 +159,10 @@ namespace MeshHexer
     ensure_property<FaceIndex, double>(
       "f:topological_distance",
       [&]() { topological_distances(_mesh, "f:MIS_id", "f:max_search_distance"); });
+
+    update_validity_from_neighbor_diameters(_mesh);
+    update_validity_from_neighbor_normals(_mesh);
+    update_validity_from_small_angles(_mesh);
 
     // Ensure gap scores are available
     score_gaps(_mesh);

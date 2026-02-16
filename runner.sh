@@ -77,6 +77,7 @@ print_stage 0
 
 # ---- compute mindist + CoarseMeshSize ----
 mindist="$(./meshhexer-cli --checkpoint-path "${FOLDER}/MINGAP.vtu" min-gap "${FOLDER}/surface.off")"
+#mindist=1.8
 emit_info "mindist=${mindist}"
 
 #stage[1]
@@ -100,7 +101,7 @@ print_stage 2
 mpirun -np ${NumProc} ./meshcleaner \
   -h "${FOLDER}/Coarse_meshDir/Mesh.tri" \
   -t "${FOLDER}/surface.off" \
-  -s 1.0 \
+  -s 1.0  \
   -o "${FOLDER}"
 
 
@@ -122,7 +123,9 @@ echo "${FOLDER}/surface.off" >> mesh_names.offs
 #stage[4]
 print_stage 4
 # MeshRefinement
-./meshref -f "${FOLDER}"
+./meshref -f "${FOLDER}"\
+  -t 1.0 \
+
 
 #stage[5]
 print_stage 5

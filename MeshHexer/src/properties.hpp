@@ -33,6 +33,9 @@ namespace MeshHexer
    */
   void topological_distances(Mesh& mesh, const std::string& property, double max_distance = 0.0);
   void topological_distances(Mesh& mesh, const std::string& targets_property, const std::string& max_distance_property);
+  void update_validity_from_neighbor_diameters(Mesh& mesh);
+  void update_validity_from_neighbor_normals(Mesh& mesh);
+  void update_validity_from_small_angles(Mesh& mesh, double min_angle_degrees = 4.0);
 
   /**
    * \brief Computes vertex normals and makes them available as v:normals
@@ -63,6 +66,12 @@ namespace MeshHexer
 
   /// Determine a best-effort guess at the minimal gap of the given mesh
   Gap min_gap(Mesh& mesh);
+
+  /// Shoot inward normals per face and store nearest hit distance / target face
+  void normal_distances(Mesh& mesh, const AABBTree& aabb_tree);
+
+  /// Combine MIS and normal distances into a single monitor field
+  void monitor_distances(Mesh& mesh);
 
   std::vector<std::pair<Point2D, double>> z_depths(Mesh& mesh, AABBTree& aabb_tree);
 } // namespace MeshHexer

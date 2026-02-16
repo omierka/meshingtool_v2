@@ -135,6 +135,9 @@ program demo
   end if
 
   call read_tri_mesh(trim(tri_file), dcorvg_tri, kvert_tri, nvt_tri, ntri, MIS_diameter)
+  do i = 1, size(MIS_diameter)
+    if (MIS_diameter(i) < 0.0_dp) MIS_diameter(i) = 10.0_dp*dMinGap
+  end do
   if (mpi_rank == 0) then
     write(*,'(A,1X,A,1X,"with",1X,I0,1X,"vertices and",1X,I0,1X,"triangles")') &
          'Loaded triangle mesh:', trim(tri_file), nvt_tri, ntri

@@ -351,7 +351,7 @@ contains
         identify_section = section_offsets
       else if (index(text, 'Name="types"') > 0) then
         identify_section = section_types
-      else if (index(text, 'Name="MIS_diameter"') > 0) then
+      else if (index(text, 'Name="Monitor"') > 0) then
         identify_section = section_mis
       else
         identify_section = section_none

@@ -314,6 +314,14 @@ namespace MeshHexer
 
     Mesh::Property_map<FaceIndex, int> iters = mesh.add_property_map<FaceIndex, int>("f:MIS_iters", 0).first;
 
+    Mesh::Property_map<FaceIndex, std::uint32_t> validity =
+      mesh.add_property_map<FaceIndex, std::uint32_t>("f:Validity", 0).first;
+
+    for(FaceIndex f : mesh.faces())
+    {
+      validity[f] = 0;
+    }
+
     // Determine bounding box of mesh
     const Real max_radius = std::min({
                               aabb_tree.bbox().xmax() - aabb_tree.bbox().xmin(),
@@ -323,6 +331,28 @@ namespace MeshHexer
                             Real(2.0);
 
     const Real normal_direction = PMP::is_outward_oriented(mesh) ? Real(-1.0) : Real(1.0);
+
+    auto faces_are_adjacent = [&](FaceIndex lhs, FaceIndex rhs) {
+      if(rhs == Mesh::null_face() || lhs == Mesh::null_face())
+      {
+        return false;
+      }
+      if(lhs == rhs)
+      {
+        return false;
+      }
+
+      for(HalfedgeIndex h : mesh.halfedges_around_face(mesh.halfedge(lhs)))
+      {
+        FaceIndex neighbor = mesh.face(mesh.opposite(h));
+        if(neighbor == rhs)
+        {
+          return true;
+        }
+      }
+
+      return false;
+    };
 
     MESHHEXER_PRAGMA_OMP(parallel for)
     for(FaceIndex face_index : mesh.faces())
@@ -497,6 +527,145 @@ namespace MeshHexer
       // similarity[face_index] = std::abs(CGAL::to_double(CGAL::scalar_product(inward_normal, surface_normal(mesh, id,
       // closest_point))));
       similarity[face_index] = CGAL::scalar_product(inward_normal, -PMP::compute_face_normal(id, mesh));
+
+      if(validity[face_index] == 0 && faces_are_adjacent(face_index, id))
+      {
+        validity[face_index] = 1;
+      }
+    }
+  }
+
+  void normal_distances(Mesh& mesh, const AABBTree& aabb_tree)
+  {
+    if(mesh.num_faces() == 0)
+    {
+      return;
+    }
+
+    Mesh::Property_map<FaceIndex, double> normal_distance =
+      mesh.add_property_map<FaceIndex, double>("f:normaldistance", 0.0).first;
+
+    constexpr std::uint32_t invalid_face = std::numeric_limits<std::uint32_t>::max();
+    Mesh::Property_map<FaceIndex, std::uint32_t> target_face =
+      mesh.add_property_map<FaceIndex, std::uint32_t>("f:normaldistance_target", invalid_face).first;
+
+    const Real normal_direction = PMP::is_outward_oriented(mesh) ? Real(-1.0) : Real(1.0);
+
+    MESHHEXER_PRAGMA_OMP(parallel for schedule(dynamic))
+    for(FaceIndex face_index : mesh.faces())
+    {
+      Point3D centroid(0.0, 0.0, 0.0);
+      for(VertexIndex v : mesh.vertices_around_face(mesh.halfedge(face_index)))
+      {
+        centroid += Real(1.0 / 3.0) * Vector3D(Point3D(CGAL::Origin()), mesh.point(v));
+      }
+
+      Vector3D normal(surface_normal(mesh, face_index, centroid));
+      double length = std::sqrt(normal.squared_length());
+      if(length == 0.0)
+      {
+        normal_distance[face_index] = 0.0;
+        target_face[face_index] = invalid_face;
+        continue;
+      }
+      normal /= length;
+
+      Vector3D inward_normal = normal_direction * normal;
+      Ray3D ray(centroid, inward_normal);
+      auto skip = [=](FaceIndex idx) { return idx == face_index; };
+      std::optional<RayIntersection> intersection = aabb_tree.first_intersection(ray, skip);
+
+      double best_distance = 0.0;
+      FaceIndex best_target = Mesh::null_face();
+
+      const auto consider_point = [&](const Point3D& p, FaceIndex candidate) {
+        double dist = CGAL::approximate_sqrt(Vector3D(centroid, p).squared_length());
+        if(dist > 0.0 && (best_target == Mesh::null_face() || dist < best_distance))
+        {
+          best_distance = dist;
+          best_target = candidate;
+        }
+      };
+
+      if(intersection)
+      {
+        FaceIndex candidate = intersection->second;
+
+        if(std::holds_alternative<Point3D>(intersection->first))
+        {
+          consider_point(std::get<Point3D>(intersection->first), candidate);
+        }
+        else if(std::holds_alternative<Segment3D>(intersection->first))
+        {
+          consider_point(std::get<Segment3D>(intersection->first).source(), candidate);
+        }
+      }
+
+      normal_distance[face_index] = best_distance;
+      if(best_target != Mesh::null_face())
+      {
+        target_face[face_index] = static_cast<std::uint32_t>(best_target);
+      }
+      else
+      {
+        target_face[face_index] = invalid_face;
+      }
+    }
+  }
+
+  void monitor_distances(Mesh& mesh)
+  {
+    auto maybe_mis = mesh.property_map<FaceIndex, double>("f:MIS_diameter");
+    auto maybe_normal = mesh.property_map<FaceIndex, double>("f:normaldistance");
+
+    if(!maybe_mis.has_value() || !maybe_normal.has_value())
+    {
+      return;
+    }
+
+    Mesh::Property_map<FaceIndex, double> mis = maybe_mis.value();
+    Mesh::Property_map<FaceIndex, double> normal = maybe_normal.value();
+
+    Mesh::Property_map<FaceIndex, double> monitor =
+      mesh.add_property_map<FaceIndex, double>("f:Monitor", 0.0).first;
+
+    for(FaceIndex f : mesh.faces())
+    {
+      monitor[f] = std::max(mis[f], normal[f]);
+    }
+  }
+
+  void invalidate_monitors_below(Mesh& mesh, double min_gap_diameter)
+  {
+    auto maybe_monitor = mesh.property_map<FaceIndex, double>("f:Monitor");
+    if(!maybe_monitor.has_value())
+    {
+      return;
+    }
+
+    Mesh::Property_map<FaceIndex, double> monitor = maybe_monitor.value();
+
+    Mesh::Property_map<FaceIndex, std::uint32_t> validity;
+    bool has_validity = false;
+    if(auto maybe_validity = mesh.property_map<FaceIndex, std::uint32_t>("f:Validity"); maybe_validity.has_value())
+    {
+      validity = maybe_validity.value();
+      has_validity = true;
+    }
+
+    for(FaceIndex f : mesh.faces())
+    {
+      if(monitor[f] >= min_gap_diameter)
+      {
+        continue;
+      }
+
+      monitor[f] = -1.0;
+
+      if(has_validity && validity[f] == 0)
+      {
+        validity[f] = 5;
+      }
     }
   }
 
@@ -565,6 +734,178 @@ namespace MeshHexer
     for(FaceIndex f : mesh.faces())
     {
       topo_distance[f] = topological_distance(f, FaceIndex(targets[f]), mesh, edge_lengths, max_distances[f]);
+    }
+  }
+
+  void update_validity_from_neighbor_diameters(Mesh& mesh)
+  {
+    auto maybe_validity = mesh.property_map<FaceIndex, std::uint32_t>("f:Validity");
+    auto maybe_diameters = mesh.property_map<FaceIndex, double>("f:MIS_diameter");
+
+    if(!maybe_validity.has_value() || !maybe_diameters.has_value())
+    {
+      return;
+    }
+
+    Mesh::Property_map<FaceIndex, std::uint32_t> validity = maybe_validity.value();
+    Mesh::Property_map<FaceIndex, double> diameters = maybe_diameters.value();
+
+    for(FaceIndex f : mesh.faces())
+    {
+      if(validity[f] != 0)
+      {
+        continue;
+      }
+
+      const double current_diameter = diameters[f];
+      if(current_diameter <= 0.0)
+      {
+        continue;
+      }
+
+      bool larger_neighbors = true;
+      for(HalfedgeIndex h : mesh.halfedges_around_face(mesh.halfedge(f)))
+      {
+        FaceIndex neighbor = mesh.face(mesh.opposite(h));
+        if(neighbor == Mesh::null_face())
+        {
+          larger_neighbors = false;
+          break;
+        }
+
+        if(!(diameters[neighbor] > 2.0 * current_diameter))
+        {
+          larger_neighbors = false;
+          break;
+        }
+      }
+
+      if(larger_neighbors)
+      {
+        validity[f] = 2;
+      }
+    }
+  }
+
+  void update_validity_from_neighbor_normals(Mesh& mesh)
+  {
+    auto maybe_validity = mesh.property_map<FaceIndex, std::uint32_t>("f:Validity");
+
+    if(!maybe_validity.has_value())
+    {
+      return;
+    }
+
+    Mesh::Property_map<FaceIndex, std::uint32_t> validity = maybe_validity.value();
+
+    const Real normal_direction = PMP::is_outward_oriented(mesh) ? Real(-1.0) : Real(1.0);
+    const double angle_threshold = 60.0;
+
+    for(FaceIndex f : mesh.faces())
+    {
+      if(validity[f] != 0)
+      {
+        continue;
+      }
+
+      Vector3D inward_normal = normal_direction * PMP::compute_face_normal(f, mesh);
+      const double base_length = std::sqrt(inward_normal.squared_length());
+      if(base_length == 0.0)
+      {
+        continue;
+      }
+      inward_normal /= base_length;
+
+      bool exceeds_threshold = false;
+      for(HalfedgeIndex h : mesh.halfedges_around_face(mesh.halfedge(f)))
+      {
+        FaceIndex neighbor = mesh.face(mesh.opposite(h));
+        if(neighbor == Mesh::null_face())
+        {
+          continue;
+        }
+
+        Vector3D neighbor_normal = normal_direction * PMP::compute_face_normal(neighbor, mesh);
+        const double neighbor_length = std::sqrt(neighbor_normal.squared_length());
+        if(neighbor_length == 0.0)
+        {
+          continue;
+        }
+        neighbor_normal /= neighbor_length;
+
+        const double angle = CGAL::approximate_angle(inward_normal, neighbor_normal);
+        if(angle > angle_threshold)
+        {
+          exceeds_threshold = true;
+          break;
+        }
+      }
+
+      if(exceeds_threshold)
+      {
+        validity[f] = 3;
+      }
+    }
+  }
+
+  void update_validity_from_small_angles(Mesh& mesh, double min_angle_degrees)
+  {
+    auto maybe_validity = mesh.property_map<FaceIndex, std::uint32_t>("f:Validity");
+
+    if(!maybe_validity.has_value())
+    {
+      return;
+    }
+
+    Mesh::Property_map<FaceIndex, std::uint32_t> validity = maybe_validity.value();
+
+    for(FaceIndex f : mesh.faces())
+    {
+      if(validity[f] != 0)
+      {
+        continue;
+      }
+
+      std::array<Point3D, 3> points;
+      std::size_t idx = 0;
+      for(VertexIndex v : mesh.vertices_around_face(mesh.halfedge(f)))
+      {
+        if(idx < points.size())
+        {
+          points[idx++] = mesh.point(v);
+        }
+      }
+
+      if(idx != 3)
+      {
+        continue;
+      }
+
+      bool small_angle = false;
+      for(std::size_t i = 0; i < 3; ++i)
+      {
+        Vector3D edge1(points[i], points[(i + 1) % 3]);
+        Vector3D edge2(points[i], points[(i + 2) % 3]);
+
+        const double len1 = edge1.squared_length();
+        const double len2 = edge2.squared_length();
+        if(len1 == 0.0 || len2 == 0.0)
+        {
+          continue;
+        }
+
+        double angle = CGAL::approximate_angle(edge1, edge2);
+        if(angle < min_angle_degrees)
+        {
+          small_angle = true;
+          break;
+        }
+      }
+
+      if(small_angle)
+      {
+        validity[f] = 4;
+      }
     }
   }
 
@@ -783,6 +1124,10 @@ namespace MeshHexer
         minimum = diameters[f];
       }
     }
+
+    // Refresh monitor field and invalidate any values below the global min-gap
+    monitor_distances(mesh);
+    invalidate_monitors_below(mesh, minimum);
 
     return {gap_face, ids[gap_face], diameters[gap_face], scores[gap_face]};
   }

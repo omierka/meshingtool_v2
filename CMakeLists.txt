@@ -24,6 +24,7 @@ add_subdirectory(MeshHexer)
 add_subdirectory(AxiMesher)
 add_subdirectory(MeshCleaner)
 add_subdirectory(MonitorGeneratorForMesher)
+add_subdirectory(MeshRef)
 
 # Install just meshhexer-cli
 install(TARGETS meshhexer-cli DESTINATION bin)
