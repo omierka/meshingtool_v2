@@ -33,3 +33,8 @@ install(TARGETS meshhexer-cli DESTINATION bin)
 install(PROGRAMS runner.sh DESTINATION bin RENAME newgenmeshingtool)
 install(PROGRAMS run_all_cases.sh DESTINATION bin)
 install(FILES preprocessor.cfg DESTINATION bin)
+install(PROGRAMS
+  PostProc/render_all_snapshots.py
+  PostProc/render_filtered_snapshot.py
+  DESTINATION bin
+)

@@ -153,6 +153,14 @@ for idx in "${!case_paths[@]}"; do
     echo "Case '${case_name}' failed" >&2
     exit 1
   fi
+
+  if (( ${#clean_flag[@]} > 0 )); then
+    echo
+    find "${case_path}" -maxdepth 1 -type f -name '*.png' -delete
+    rm -f "${case_path}/size_distribution_histogram.txt"
+    continue
+  fi
+
   nel_display=""
   monitor_summary=""
   if (( ${#clean_flag[@]} == 0 )); then
