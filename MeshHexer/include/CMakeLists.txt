@@ -1,6 +1,7 @@
 set(MESHHEXER_PUBLIC_HEADERS
   meshhexer/meshhexer.hpp
   meshhexer/types.hpp
+  meshhexer/config.hpp
 )
 
 target_sources(MeshHexer

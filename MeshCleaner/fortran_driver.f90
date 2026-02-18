@@ -120,6 +120,7 @@ program fortran_cgal_demo
     real(c_double), allocatable :: hex_coords(:, :)
     integer(c_int), allocatable :: hex_kvert(:, :)
     integer(c_int), allocatable :: hex_knpr(:)
+    integer(c_int), allocatable :: hex_monitor(:)
     integer(c_int) :: ierr
     integer(c_size_t) :: buffer_len
     real(c_double), allocatable :: elem_vertices(:)
@@ -134,6 +135,7 @@ program fortran_cgal_demo
     real(c_double), allocatable :: filtered_coords(:, :)
     integer(c_int), allocatable :: filtered_kvert(:, :)
     integer(c_int), allocatable :: filtered_knpr(:)
+    integer(c_int), allocatable :: filtered_monitor(:)
     integer :: filtered_nel, filtered_nvt
     logical :: element_selected, vertex_inside, all_vertices_inside
     integer :: inside_vertex_count
@@ -151,12 +153,16 @@ program fortran_cgal_demo
     type(FaceList) :: boundary_faces
     logical :: hc_summary_ready, box_summary_ready
     character(len=512) :: mesh_output_folder
+    character(len=512) :: monitor_summary_file
     character(len=512), allocatable :: meshdir_files(:)
     integer :: meshdir_file_count
     integer :: mpi_rank, mpi_size, mpi_err
     integer :: worker_count, worker_rank
     logical :: is_master, is_worker
     integer, parameter :: PROGRESS_TAG = 9001
+    integer, parameter :: MONITOR_BUCKETS = 4
+    logical :: monitor_data_available, use_vtu_input
+    integer :: monitor_hist_before(MONITOR_BUCKETS), monitor_hist_after(MONITOR_BUCKETS)
 
     surface_file = "sphere.off"
     hex_file = "single.tri"
@@ -169,6 +175,9 @@ program fortran_cgal_demo
     box_summary_ready = .false.
     meshdir_file_count = 0
     allocate(meshdir_files(0))
+    monitor_data_available = .false.
+    monitor_hist_before = 0
+    monitor_hist_after = 0
 
     call MPI_Init(mpi_err)
     if (mpi_err /= MPI_SUCCESS) then
@@ -222,9 +231,22 @@ program fortran_cgal_demo
         error stop "Copying triangle connectivity from CGAL failed."
     end if
 
-    call read_single_tri(trim(hex_file), hex_nel, hex_nvt, hex_nve, hex_nbct, hex_nee, hex_nae, header_line1, header_line2, &
-                         hex_coords, hex_kvert, hex_knpr)
+    use_vtu_input = file_has_extension(trim(hex_file), ".vtu")
+    if (use_vtu_input) then
+        call read_vtu_hex(trim(hex_file), hex_nel, hex_nvt, hex_nve, hex_nbct, hex_nee, hex_nae, header_line1, header_line2, &
+                          hex_coords, hex_kvert, hex_knpr, hex_monitor, monitor_data_available)
+    else
+        call read_single_tri(trim(hex_file), hex_nel, hex_nvt, hex_nve, hex_nbct, hex_nee, hex_nae, header_line1, header_line2, &
+                             hex_coords, hex_kvert, hex_knpr)
+        allocate(hex_monitor(hex_nel))
+        hex_monitor = 0
+        monitor_data_available = .false.
+    end if
     hex_coords = hex_scale * hex_coords
+    if (monitor_data_available .and. is_master) then
+        call compute_monitor_histogram(hex_monitor, monitor_hist_before)
+        call print_monitor_distribution("[MONITOR_BEFORE]", monitor_hist_before, hex_nel)
+    end if
     allocate(elem_vertices(3 * hex_nve))
     allocate(local_coords(3, hex_nve))
     allocate(intersect_mask(hex_nel))
@@ -342,6 +364,13 @@ program fortran_cgal_demo
     if (is_master) then
         intersect_count = count(intersect_mask)
         count_discarded = hex_nel - (count_inside + count_intersected + count_edge_intersected + count_diagonal_intersected)
+        if (monitor_data_available) then
+            call compute_monitor_histogram_masked(hex_monitor, intersect_mask, monitor_hist_after)
+            call print_monitor_distribution("[MONITOR_AFTER]", monitor_hist_after, intersect_count)
+            call ensure_directory_exists(output_folder)
+            call build_config_path(trim(output_folder), "monitor_summary.txt", monitor_summary_file)
+            call write_monitor_summary_file(trim(monitor_summary_file), monitor_hist_after, intersect_count)
+        end if
     end if
 
     if (is_master .and. intersect_count > 0) then
@@ -349,8 +378,14 @@ program fortran_cgal_demo
         call build_config_path(trim(mesh_output_folder), "Filtered.tri", filtered_hex_file)
         write(filtered_vtu_file(1:),'(A)') adjustl(trim(output_folder))//"/Filtered.vtu"
         write(filtered_tri_file(1:),'(A)') adjustl(trim(output_folder))//"/Filtered.tri"
-        call reduce_hex_mesh(intersect_mask, hex_coords, hex_kvert, hex_knpr, hex_nve, filtered_coords, filtered_kvert, &
-                             filtered_knpr, filtered_nel, filtered_nvt)
+        if (monitor_data_available) then
+            call reduce_hex_mesh(intersect_mask, hex_coords, hex_kvert, hex_knpr, hex_nve, filtered_coords, &
+                                 filtered_kvert, filtered_knpr, filtered_nel, filtered_nvt, monitor_in=hex_monitor, &
+                                 out_monitor=filtered_monitor)
+        else
+            call reduce_hex_mesh(intersect_mask, hex_coords, hex_kvert, hex_knpr, hex_nve, filtered_coords, &
+                                 filtered_kvert, filtered_knpr, filtered_nel, filtered_nvt)
+        end if
         call recompute_knpr_from_connectivity(filtered_kvert, filtered_knpr, boundary_faces)
         if (mesh_config%loaded) then
             select case (trim(mesh_config%mesh_type))
@@ -372,7 +407,11 @@ program fortran_cgal_demo
         call write_single_tri(filtered_hex_file, header_line1, header_line2, filtered_nel, filtered_nvt, hex_nbct, &
                               hex_nve, hex_nee, hex_nae, 0.1_c_double * filtered_coords, filtered_kvert, filtered_knpr)
         call append_file_record(meshdir_files, meshdir_file_count, "Filtered.tri")
-        call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr)
+        if (monitor_data_available) then
+            call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr, monitor_values=filtered_monitor)
+        else
+            call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr)
+        end if
         call write_project_file(mesh_output_folder, meshdir_files, meshdir_file_count)
     end if
 
@@ -724,6 +763,291 @@ contains
         end if
     end subroutine write_par_file
 
+    subroutine compute_monitor_histogram(monitor_values, histogram)
+        integer(c_int), intent(in) :: monitor_values(:)
+        integer, intent(out) :: histogram(MONITOR_BUCKETS)
+        integer :: idx, bucket
+
+        histogram = 0
+        do idx = 1, size(monitor_values)
+            bucket = int(monitor_values(idx))
+            if (bucket >= 0 .and. bucket < MONITOR_BUCKETS) then
+                histogram(bucket + 1) = histogram(bucket + 1) + 1
+            end if
+        end do
+    end subroutine compute_monitor_histogram
+
+    subroutine compute_monitor_histogram_masked(monitor_values, mask, histogram)
+        integer(c_int), intent(in) :: monitor_values(:)
+        logical, intent(in) :: mask(:)
+        integer, intent(out) :: histogram(MONITOR_BUCKETS)
+        integer :: idx, bucket
+
+        if (size(monitor_values) /= size(mask)) error stop "Monitor histogram mask mismatch."
+        histogram = 0
+        do idx = 1, size(monitor_values)
+            if (.not. mask(idx)) cycle
+            bucket = int(monitor_values(idx))
+            if (bucket >= 0 .and. bucket < MONITOR_BUCKETS) then
+                histogram(bucket + 1) = histogram(bucket + 1) + 1
+            end if
+        end do
+    end subroutine compute_monitor_histogram_masked
+
+    subroutine print_monitor_distribution(label, histogram, total_count)
+        character(len=*), intent(in) :: label
+        integer, intent(in) :: histogram(MONITOR_BUCKETS)
+        integer, intent(in) :: total_count
+        real(c_double) :: pct(MONITOR_BUCKETS)
+        real(c_double) :: denom
+        integer :: bucket
+
+        denom = real(max(1, total_count), kind=c_double)
+        do bucket = 1, MONITOR_BUCKETS
+            pct(bucket) = 100.0_c_double * real(histogram(bucket), kind=c_double) / denom
+        end do
+        write (*,'(A,1X,"0=[",F6.2,"%]",1X,"1=[",F6.2,"%]",1X,"2=[",F6.2,"%]",1X,"3=[",F6.2,"%]")') &
+            trim(label), pct(1), pct(2), pct(3), pct(4)
+    end subroutine print_monitor_distribution
+
+    subroutine write_monitor_summary_file(filepath, histogram, total_count)
+        character(len=*), intent(in) :: filepath
+        integer, intent(in) :: histogram(MONITOR_BUCKETS)
+        integer, intent(in) :: total_count
+        integer :: unit
+        real(c_double) :: pct(MONITOR_BUCKETS), denom
+
+        denom = real(max(1, total_count), kind=c_double)
+        pct = 0.0_c_double
+        pct = 100.0_c_double * real(histogram, kind=c_double) / denom
+        open(newunit=unit, file=trim(filepath), status="replace", action="write")
+        write(unit,'("MONITOR_AFTER ", "0=[",F5.1,"%]",1X,"1=[",F5.1,"%]",1X,"2=[",F5.1,"%]",1X,"3=[",F5.1,"%]")') &
+            pct(1), pct(2), pct(3), pct(4)
+        close(unit)
+    end subroutine write_monitor_summary_file
+
+    pure function to_lower_char(ch) result(lower)
+        character(len=1), intent(in) :: ch
+        character(len=1) :: lower
+        integer :: code
+
+        lower = ch
+        code = iachar(ch)
+        if (code >= iachar('A') .and. code <= iachar('Z')) lower = achar(code + 32)
+    end function to_lower_char
+
+    logical function file_has_extension(path, extension) result(has_ext)
+        character(len=*), intent(in) :: path, extension
+        integer :: path_len, ext_len, idx, path_pos
+
+        has_ext = .false.
+        path_len = len_trim(path)
+        ext_len = len_trim(extension)
+        if (ext_len == 0 .or. path_len < ext_len) return
+        path_pos = path_len - ext_len + 1
+        has_ext = .true.
+        do idx = 1, ext_len
+            if (to_lower_char(path(path_pos:path_pos)) /= to_lower_char(extension(idx:idx))) then
+                has_ext = .false.
+                exit
+            end if
+            path_pos = path_pos + 1
+        end do
+    end function file_has_extension
+
+    integer function extract_attribute_int(line, attribute) result(value)
+        character(len=*), intent(in) :: line, attribute
+        integer :: attr_pos, closing_pos, ios
+        character(len=256) :: buffer
+
+        value = 0
+        buffer = ""
+        attr_pos = index(line, trim(attribute))
+        if (attr_pos <= 0) error stop "Missing VTU attribute."
+        attr_pos = attr_pos + len_trim(attribute)
+        closing_pos = index(line(attr_pos:), '"')
+        if (closing_pos <= 0) error stop "Malformed VTU attribute."
+        buffer = line(attr_pos:attr_pos + closing_pos - 2)
+        read(buffer, *, iostat=ios) value
+        if (ios /= 0) error stop "Failed to parse VTU attribute."
+    end function extract_attribute_int
+
+    subroutine read_vtu_hex(filename, nel, nvt, nve, nbct, nee, nae, header1, header2, coords, kvert, knpr, monitor, &
+        monitor_available)
+        character(len=*), intent(in) :: filename
+        integer, intent(out) :: nel, nvt, nve, nbct, nee, nae
+        character(len=*), intent(out) :: header1, header2
+        real(c_double), allocatable, intent(out) :: coords(:, :)
+        integer(c_int), allocatable, intent(out) :: kvert(:, :)
+        integer(c_int), allocatable, intent(out) :: knpr(:)
+        integer(c_int), allocatable, intent(out) :: monitor(:)
+        logical, intent(out) :: monitor_available
+
+        integer :: unit, ios, cell_idx, local_idx, flat_idx
+        character(len=1024) :: line
+        logical :: in_pointdata, in_celldata, in_points, in_cells
+        logical :: counts_ready, coords_loaded, knpr_loaded, monitor_loaded, conn_loaded
+        real(c_double), allocatable :: coord_flat(:)
+        integer(c_int), allocatable :: connectivity(:), offsets(:), types(:)
+
+        nel = 0
+        nvt = 0
+        nve = 8
+        nbct = 0
+        nee = 0
+        nae = 0
+        header1 = "VTU INPUT"
+        header2 = "Converted from VTU"
+        monitor_available = .false.
+        in_pointdata = .false.
+        in_celldata = .false.
+        in_points = .false.
+        in_cells = .false.
+        counts_ready = .false.
+        coords_loaded = .false.
+        knpr_loaded = .false.
+        monitor_loaded = .false.
+        conn_loaded = .false.
+
+        open(newunit=unit, file=trim(filename), status="old", action="read", iostat=ios)
+        if (ios /= 0) error stop "Failed to open VTU mesh."
+
+        do
+            read(unit, '(A)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, "<Piece") > 0) then
+                nvt = extract_attribute_int(line, 'NumberOfPoints="')
+                nel = extract_attribute_int(line, 'NumberOfCells="')
+                if (nvt <= 0 .or. nel <= 0) error stop "Invalid VTU mesh sizes."
+                if (.not. counts_ready) then
+                    allocate(coords(3, nvt))
+                    allocate(kvert(nve, nel))
+                    allocate(knpr(nvt))
+                    allocate(monitor(nel))
+                    monitor = 0
+                    counts_ready = .true.
+                end if
+            else if (index(line, "<PointData") > 0) then
+                in_pointdata = .true.
+            else if (index(line, "</PointData") > 0) then
+                in_pointdata = .false.
+            else if (index(line, "<CellData") > 0) then
+                in_celldata = .true.
+            else if (index(line, "</CellData") > 0) then
+                in_celldata = .false.
+            else if (index(line, "<Points") > 0) then
+                in_points = .true.
+            else if (index(line, "</Points") > 0) then
+                in_points = .false.
+            else if (index(line, "<Cells") > 0) then
+                in_cells = .true.
+            else if (index(line, "</Cells") > 0) then
+                in_cells = .false.
+            else if (in_pointdata .and. index(line, "<DataArray") > 0 .and. index(line, 'Name="KNPR"') > 0) then
+                if (.not. counts_ready) error stop "VTU PointData encountered before Piece definition."
+                call read_vtu_int_array(unit, nvt, knpr)
+                knpr_loaded = .true.
+            else if (in_celldata .and. index(line, "<DataArray") > 0 .and. index(line, 'Name="monitor"') > 0) then
+                if (.not. counts_ready) error stop "VTU CellData encountered before Piece definition."
+                call read_vtu_int_array(unit, nel, monitor)
+                monitor_loaded = .true.
+                monitor_available = .true.
+            else if (in_points .and. index(line, "<DataArray") > 0 .and. index(line, 'NumberOfComponents="3"') > 0) then
+                if (.not. counts_ready) error stop "VTU Points encountered before Piece definition."
+                if (.not. allocated(coord_flat)) allocate(coord_flat(3 * nvt))
+                call read_vtu_real_array(unit, 3 * nvt, coord_flat)
+                coords_loaded = .true.
+            else if (in_cells .and. index(line, "<DataArray") > 0 .and. index(line, 'Name="connectivity"') > 0) then
+                if (.not. counts_ready) error stop "VTU Cells encountered before Piece definition."
+                if (.not. allocated(connectivity)) allocate(connectivity(nve * nel))
+                call read_vtu_int_array(unit, nve * nel, connectivity)
+                conn_loaded = .true.
+            else if (in_cells .and. index(line, "<DataArray") > 0 .and. index(line, 'Name="offsets"') > 0) then
+                if (.not. counts_ready) error stop "VTU offsets encountered before Piece definition."
+                if (.not. allocated(offsets)) allocate(offsets(nel))
+                call read_vtu_int_array(unit, nel, offsets)
+            else if (in_cells .and. index(line, "<DataArray") > 0 .and. index(line, 'Name="types"') > 0) then
+                if (.not. counts_ready) error stop "VTU types encountered before Piece definition."
+                if (.not. allocated(types)) allocate(types(nel))
+                call read_vtu_int_array(unit, nel, types)
+            end if
+        end do
+
+        close(unit)
+
+        if (.not. counts_ready) error stop "VTU file missing Piece definition."
+        if (.not. coords_loaded) error stop "VTU file missing coordinate data."
+        if (.not. knpr_loaded) then
+            knpr = 0
+        end if
+        if (.not. monitor_loaded) then
+            monitor = 0
+            monitor_available = .false.
+        end if
+        if (.not. conn_loaded) error stop "VTU file missing connectivity."
+
+        if (allocated(types)) then
+            do cell_idx = 1, nel
+                if (int(types(cell_idx)) /= 12) then
+                    error stop "Unsupported VTU cell type detected."
+                end if
+            end do
+        end if
+
+        flat_idx = 0
+        do cell_idx = 1, nel
+            do local_idx = 1, nve
+                flat_idx = flat_idx + 1
+                kvert(local_idx, cell_idx) = int(connectivity(flat_idx) + 1, kind=c_int)
+            end do
+        end do
+        if (allocated(coord_flat)) then
+            do cell_idx = 1, nvt
+                coords(1, cell_idx) = coord_flat(3 * (cell_idx - 1) + 1)
+                coords(2, cell_idx) = coord_flat(3 * (cell_idx - 1) + 2)
+                coords(3, cell_idx) = coord_flat(3 * (cell_idx - 1) + 3)
+            end do
+            deallocate(coord_flat)
+        end if
+        if (allocated(connectivity)) deallocate(connectivity)
+        if (allocated(offsets)) deallocate(offsets)
+        if (allocated(types)) deallocate(types)
+    end subroutine read_vtu_hex
+
+    subroutine read_vtu_real_array(unit, count, values)
+        integer, intent(in) :: unit, count
+        real(c_double), intent(out) :: values(:)
+        integer :: ios, idx
+        character(len=1024) :: line
+
+        if (count <= 0) then
+            read(unit, '(A)', iostat=ios) line
+            if (ios /= 0) error stop "Unexpected end of VTU data array."
+            return
+        end if
+        if (size(values) < count) error stop "Insufficient VTU real buffer."
+        read(unit, *)(values(idx), idx = 1, count)
+        read(unit, '(A)', iostat=ios) line
+        if (ios /= 0) error stop "Missing VTU DataArray terminator."
+    end subroutine read_vtu_real_array
+
+    subroutine read_vtu_int_array(unit, count, values)
+        integer, intent(in) :: unit, count
+        integer(c_int), intent(out) :: values(:)
+        integer :: ios, idx
+        character(len=1024) :: line
+
+        if (count <= 0) then
+            read(unit, '(A)', iostat=ios) line
+            if (ios /= 0) error stop "Unexpected end of VTU data array."
+            return
+        end if
+        if (size(values) < count) error stop "Insufficient VTU integer buffer."
+        read(unit, *)(values(idx), idx = 1, count)
+        read(unit, '(A)', iostat=ios) line
+        if (ios /= 0) error stop "Missing VTU DataArray terminator."
+    end subroutine read_vtu_int_array
+
     function to_c_string(str) result(c_chars)
         character(len=*), intent(in) :: str
         character(kind=c_char), allocatable :: c_chars(:)
@@ -777,7 +1101,8 @@ contains
         close(unit)
     end subroutine read_single_tri
 
-    subroutine reduce_hex_mesh(intersect_mask, coords, kvert, knpr, nve, out_coords, out_kvert, out_knpr, out_nel, out_nvt)
+    subroutine reduce_hex_mesh(intersect_mask, coords, kvert, knpr, nve, out_coords, out_kvert, out_knpr, out_nel, out_nvt, &
+        monitor_in, out_monitor)
         logical, intent(in) :: intersect_mask(:)
         real(c_double), intent(in) :: coords(:, :)
         integer(c_int), intent(in) :: kvert(:, :)
@@ -787,12 +1112,16 @@ contains
         integer(c_int), allocatable, intent(out) :: out_kvert(:, :)
         integer(c_int), allocatable, intent(out) :: out_knpr(:)
         integer, intent(out) :: out_nel, out_nvt
+        integer(c_int), intent(in), optional :: monitor_in(:)
+        integer(c_int), allocatable, intent(out), optional :: out_monitor(:)
 
         integer :: hex_nel, hex_nvt
         logical, allocatable :: vertex_used(:)
         integer, allocatable :: vertex_remap(:)
         integer, allocatable :: temp_kvert(:, :)
+        integer(c_int), allocatable :: temp_monitor(:)
         integer :: elem_idx, local_idx, new_elem_idx, vid, new_vid
+        logical :: keep_monitor
 
         hex_nel = size(kvert, 2)
         hex_nvt = size(coords, 2)
@@ -802,12 +1131,21 @@ contains
             allocate(out_coords(3, 0))
             allocate(out_kvert(nve, 0))
             allocate(out_knpr(0))
+            if (present(out_monitor)) then
+                if (.not. present(monitor_in)) error stop "Monitor output requested without input data."
+                allocate(out_monitor(0))
+            end if
             return
         end if
 
         allocate(vertex_used(hex_nvt))
         vertex_used = .false.
         allocate(temp_kvert(nve, out_nel))
+        keep_monitor = present(monitor_in) .and. present(out_monitor)
+        if (keep_monitor) then
+            if (size(monitor_in) /= hex_nel) error stop "Monitor input size mismatch."
+            allocate(temp_monitor(out_nel))
+        end if
 
         new_elem_idx = 0
         do elem_idx = 1, hex_nel
@@ -818,6 +1156,7 @@ contains
                     vertex_used(vid) = .true.
                     temp_kvert(local_idx, new_elem_idx) = vid
                 end do
+                if (keep_monitor) temp_monitor(new_elem_idx) = monitor_in(elem_idx)
             end if
         end do
 
@@ -848,6 +1187,12 @@ contains
                 out_kvert(local_idx, elem_idx) = int(vertex_remap(vid), kind=c_int)
             end do
         end do
+
+        if (keep_monitor) then
+            allocate(out_monitor(out_nel))
+            out_monitor = temp_monitor
+            deallocate(temp_monitor)
+        end if
 
         deallocate(vertex_used, vertex_remap, temp_kvert)
     end subroutine reduce_hex_mesh
@@ -885,11 +1230,12 @@ contains
         close(unit)
     end subroutine write_single_tri
 
-    subroutine write_vtu(filename, coords, kvert, knpr)
+    subroutine write_vtu(filename, coords, kvert, knpr, monitor_values)
         character(len=*), intent(in) :: filename
         real(c_double), intent(in) :: coords(:, :)
         integer(c_int), intent(in) :: kvert(:, :)
         integer(c_int), intent(in) :: knpr(:)
+        integer(c_int), intent(in), optional :: monitor_values(:)
 
         integer :: unit, nvt, nel, nve
         integer :: i, j
@@ -911,7 +1257,16 @@ contains
         write(unit, '(A)') '        </DataArray>'
         write(unit, '(A)') '      </PointData>'
 
-        write(unit, '(A)') '      <CellData/>'
+        if (present(monitor_values)) then
+            if (size(monitor_values) /= nel) error stop "VTU monitor data size mismatch."
+            write(unit, '(A)') '      <CellData>'
+            write(unit, '(A)') '        <DataArray type="Int32" Name="monitor" format="ascii">'
+            write(unit, '(*(1X,I8))') (int(monitor_values(i), kind=4), i = 1, nel)
+            write(unit, '(A)') '        </DataArray>'
+            write(unit, '(A)') '      </CellData>'
+        else
+            write(unit, '(A)') '      <CellData/>'
+        end if
 
         write(unit, '(A)') '      <Points>'
         write(unit, '(A)') '        <DataArray type="Float64" NumberOfComponents="3" format="ascii">'

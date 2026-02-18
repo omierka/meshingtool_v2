@@ -3,12 +3,15 @@ program demo
   use tri_tet_intersection
   use hex_io
   use cgal_bindings, only: cgal_initialize_triangle_tree, cgal_finalize_triangle_tree, cgal_have_triangle_tree
+  use preprocessor_config_mod, only: get_monitor_clip_epsilon, get_triangle_tree_tolerance
   implicit none
   integer, parameter :: max_vertices = 32
   integer, parameter :: num_tets = num_hex_tets
   real(dp) :: Hex(3,8)
   real(dp) :: subdiv_pts(3, num_hex_sub_vertices)
   real(dp) :: eps
+  real(dp) :: config_clip_eps
+  real(dp) :: config_triangle_tol
   integer :: t, i, j, elem
   real(dp), allocatable :: dcorvg_hex(:, :)
   real(dp), allocatable :: dcorvg_tri(:, :)
@@ -72,7 +75,10 @@ program demo
   type(tMonitor) :: Monitor
   integer :: ierr_comm
 
-  eps = 1.0d-12
+  config_clip_eps = real(get_monitor_clip_epsilon(), dp)
+  config_triangle_tol = real(get_triangle_tree_tolerance(), dp)
+  eps = config_clip_eps
+  call set_preprocessor_tolerances(config_triangle_tol, config_clip_eps)
 
   verbose = .false.
   hex_file = "INPUT/hex.tri"

@@ -3,6 +3,7 @@ set(MESHHEXER_SOURCES
   io.cpp
   meshing.cpp
   properties.cpp
+  preprocessor_config.cpp
 )
 
 set(MESHHEXER_PRIVATE_HEADERS

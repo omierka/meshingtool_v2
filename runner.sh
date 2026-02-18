@@ -38,6 +38,15 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# Ensure downstream tools can locate the unified preprocessing defaults
+RUNNER_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+if [ -z "${PREPROCESSOR_CONFIG:-}" ]; then
+  export PREPROCESSOR_CONFIG="${RUNNER_DIR}/preprocessor.cfg"
+fi
+
+# Track location of monitor histogram summary
+MONITOR_SUMMARY_FILE="${FOLDER}/monitor_summary.txt"
+
 # ---- optional cleanup ----
 if [ "$CLEANUP" -eq 1 ]; then
   echo "Cleanup enabled. Removing generated files under/for: ${FOLDER}"
@@ -45,9 +54,13 @@ if [ "$CLEANUP" -eq 1 ]; then
     "${FOLDER}"/*vtu \
     "${FOLDER}"/*tri \
     "${FOLDER}"/*meshDir* \
-    "${FOLDER}"/area.txt
+    "${FOLDER}"/area.txt \
+    "${MONITOR_SUMMARY_FILE}"
     exit 0
 fi
+
+# Remove stale histogram output so only the final filter exports it
+rm -f "${MONITOR_SUMMARY_FILE}"
 
 exec 3>&1
 print_stage() {
@@ -76,17 +89,15 @@ module load cmake/3.28.3 gcc/latest-v13 openmpi/4.1.6 python/3.13.5
 print_stage 0
 
 # ---- compute mindist + CoarseMeshSize ----
-read -r mindist span <<EOF
+read -r mindist span CoarseMeshSize <<EOF
 $(./meshhexer-cli --checkpoint-path "${FOLDER}/MINGAP.vtu" min-gap "${FOLDER}/surface.off")
 EOF
 emit_info "mindist=${mindist}"
 emit_info "histogram_span=${span}"
+emit_info "CoarseMeshSize=${CoarseMeshSize}"
 
 #stage[1]
 print_stage 1
-
-CoarseMeshSize="$(python -c "import math; print(float('${mindist}') * 3.0 * (3 ** int('${span}')))")"
-emit_info "CoarseMeshSize=${CoarseMeshSize}"
 
 # ---- workflow ----
 mkdir -p "${FOLDER}/Coarse_meshDir"
@@ -126,16 +137,23 @@ echo "${FOLDER}/surface.off" >> mesh_names.offs
 print_stage 4
 # MeshRefinement
 ./meshref -f "${FOLDER}"\
-  -t 1.0 \
+	  -d ${span} \
 
 
 #stage[5]
 print_stage 5
+#ispan=${span}-1
+ispan="$(python -c "import math; print(int('${span}')-1)")"
+
+echo "${FOLDER}/RefinedCleanMesh_lvl${ispan}_refined_clean.vtu" 
+
 # Final-Mesh-Filtering
+# Ensure summary reflects only this final pass
+rm -f "${MONITOR_SUMMARY_FILE}"
 mpirun -np ${NumProc} ./meshcleaner \
-  -h "${FOLDER}/meshDir_BU/Merged_Mesh.tri" \
+  -h "${FOLDER}/RefinedCleanMesh_lvl${ispan}_refined_clean.vtu" \
   -t "${FOLDER}/surface.off" \
-  -s 10.0 \
+  -s 1.0 \
   -o "${FOLDER}"
 
 #stage[6]

@@ -32,3 +32,4 @@ install(TARGETS meshhexer-cli DESTINATION bin)
 # Install runner
 install(PROGRAMS runner.sh DESTINATION bin RENAME newgenmeshingtool)
 install(PROGRAMS run_all_cases.sh DESTINATION bin)
+install(FILES preprocessor.cfg DESTINATION bin)

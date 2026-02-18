@@ -9,6 +9,7 @@ program meshref_main
                          update_coord_tolerance_from_patches
   use var_mod, only: element_patches, clean_element_patches, hex_mesh, initialize_mesh_levels, &
                      bind_refined_mesh, default_refinement_depth, rk, Monitor_threshold
+  use preprocessor_config_mod, only: get_monitor_threshold_default
   implicit none
 
   character(len=1024) :: working_folder
@@ -26,6 +27,7 @@ program meshref_main
 
   call print_banner('MESHREF START')
   recursion_depth = default_refinement_depth
+  Monitor_threshold = real(get_monitor_threshold_default(), rk)
   call parse_command_line(working_folder, random_percentage, recursion_depth)
   input_mesh_path = trim(working_folder) // '/Coarse_meshDir/Mesh.tri'
   monitor_file_path = trim(working_folder) // '/area.txt'
@@ -81,7 +83,7 @@ program meshref_main
   end do
 
   write(label, '(A,I0,A)') 'Final No Of Elements with Refinement depth [0..', recursion_depth, ']'
-  call report_refinement_distribution(hex_mesh(0), trim(label))
+  call report_refinement_distribution(hex_mesh(recursion_depth), trim(label))
 
   call write_refined_clean_tri(hex_mesh(recursion_depth), hex_mesh(0), trim(working_folder))
 
@@ -110,7 +112,6 @@ contains
     integer, intent(out) :: random_percentage
     integer, intent(out) :: recursion_depth
     integer :: argc, idx, ios, value
-    real(rk) :: threshold_value
     character(len=1024) :: arg
 
     working_folder = ''
@@ -140,17 +141,6 @@ contains
              call print_usage('Random refinement value must be between 0 and 100.', .true.)
           end if
           random_percentage = value
-       case ('-t', '--threshold')
-          if (idx == argc) then
-             call print_usage('Missing monitor threshold value after threshold flag.', .true.)
-          end if
-          idx = idx + 1
-          call get_command_argument(idx, arg)
-          read(arg, *, iostat=ios) threshold_value
-          if (ios /= 0 .or. threshold_value < 0.0_rk) then
-             call print_usage('Monitor threshold must be a non-negative number.', .true.)
-          end if
-          Monitor_threshold = threshold_value
        case ('-d', '--depth', '--recursion-depth')
           if (idx == argc) then
              call print_usage('Missing value after depth flag.', .true.)
@@ -186,7 +176,6 @@ contains
     write(*, '(A)') '       meshref --folder <folder> [options]'
     write(*, '(A)') 'Options:'
     write(*, '(A)') '  -r, --random-refinement <0-100>  Fraction of nodes flagged for refinement.'
-    write(*, '(A)') '  -t, --threshold <value>          Monitor threshold (default 1.5).'
     write(*, '(A)') '  -d, --depth <1-3>                Recursion depth (default 2).'
     write(*, '(A)') '  -h, --help                       Show this help text.'
     if (is_error) then

@@ -10,16 +10,13 @@ meshhexer-cli --checkpoint-path <out/MINGAP.vtu> min-gap <mesh/surface.off>
 
 The CLI expects a triangulated surface mesh (`.off`, `.ply`, `.obj`, …). The optional `--checkpoint-path` flag instructs MeshHexer to persist every intermediate mesh property (`MIS_diameter`, `normaldistance`, `Monitor`, `Validity`, …) to a VTU file that downstream tools can post-process.
 
-The command prints **two** whitespace-separated values:
+The command prints **three** whitespace-separated values:
 
 1. `mindist` – the adjusted minimal gap (see Section 5)
 2. `span` – an integer in `1..3` denoting how wide the dominant monitor distribution is in logarithmic bins
+3. `coarseMeshSize` – `mindist * coarse_mesh_scaling * 3^span`, with `coarse_mesh_scaling` defaulting to 1.3
 
-These two scalars are consumed by `runner.sh`, which automatically transforms `span` into the coarse mesh size:
-
-```
-CoarseMeshSize = mindist * 3 * 3^span
-```
+All three scalars are consumed by `runner.sh`. The driver now forwards the emitted coarse mesh size directly to the structured mesher, so changing the scaling factor is centralised inside the min-gap workflow.
 
 ## 2. Geometry Preparation
 
@@ -61,7 +58,7 @@ After the raw min-gap (based on MIS diameters only) has been found, MeshHexer bu
 ### Selecting MIN/MAX bins
 
 1. Starting at the first bin, accumulate percentages until the sum exceeds 0.1 %. The bin where this happens is tagged `MIN`.
-2. From that bin upward, keep accumulating until reaching 66 % coverage or until three additional bins have been included. The last contributing bin is tagged `MAX`. If the mesh only has a single populated bin, it receives the `MIN/MAX` mark.
+2. From that bin upward, keep accumulating until reaching 80 % coverage or until three additional bins have been included. The last contributing bin is tagged `MAX`. If the mesh only has a single populated bin, it receives the `MIN/MAX` mark.
 
 The integer `span = max_index − min_index` (clamped to `[1, 3]`) corresponds to the width column returned by the CLI.
 
@@ -69,7 +66,7 @@ The integer `span = max_index − min_index` (clamped to `[1, 3]`) corresponds t
 
 After emitting the histogram MeshHexer adjusts the scalar `mindist` by setting it to the lower edge of the `MIN` bin. All monitor values strictly lower than that threshold are overwritten with `-1` and assigned validity flag 5, so post-processing tools can easily mask them out.
 
-This updated `mindist` is what the CLI prints and what the runner uses to create subsequent coarse meshes.
+This updated `mindist` (together with the histogram span and the derived coarse mesh size) is what the CLI prints and what the runner uses to create subsequent coarse meshes.
 
 ## 6. Produced Artefacts
 
@@ -79,9 +76,9 @@ Running the `min-gap` pipeline with `--checkpoint-path ${FOLDER}/MINGAP.vtu` pro
 |-------------------------------------|---------------------------------------------------------------------|
 | `${FOLDER}/MINGAP.vtu`              | Surface mesh annotated with all intermediate properties             |
 | `${FOLDER}/size_distribution_histogram.txt` | Area-weighted monitor histogram with MIN/MAX markers          |
-| CLI stdout (`mindist span`)         | Scalars ingested by `runner.sh`                                     |
+| CLI stdout (`mindist span coarseMeshSize`) | Scalars ingested by `runner.sh`                               |
 
-Downstream stages use these artefacts for mesh cleaning, monitor-field creation, and refinement, with `CoarseMeshSize = mindist * 3 * 3^span` providing a conservative starting resolution.
+Downstream stages use these artefacts for mesh cleaning, monitor-field creation, and refinement, with `CoarseMeshSize = mindist * coarse_mesh_scaling * 3^span` (default scaling 1.3) providing a conservative starting resolution.
 
 ## 7. Adjusting Defaults
 
@@ -91,5 +88,4 @@ Most thresholds mentioned above are hard-coded today (0.1 %, 66 %, 4°…). When
 2. Rebuild `meshhexer-cli`.
 3. The CLI/runner wiring will automatically pick up the new behaviour, as only the values flowing through the existing pipeline change.
 
-Please coordinate changes to the console output (`mindist span`) with users of `runner.sh` to keep the coarse-mesh derivation consistent.
-
+Please coordinate changes to the console output (`mindist span coarseMeshSize`) with users of `runner.sh` to keep the coarse-mesh derivation consistent.

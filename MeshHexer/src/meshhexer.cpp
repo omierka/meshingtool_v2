@@ -6,6 +6,7 @@
 #include <meshing.hpp>
 #include <properties.hpp>
 #include <meshhexer/types.hpp>
+#include <meshhexer/config.hpp>
 #include <warnings.hpp>
 
 #include <algorithm>
@@ -159,8 +160,8 @@ namespace MeshHexer
       _mesh.add_property_map<FaceIndex, double>("f:MIS_diameter", 0.0).first;
 
     const double ms = mesh_size(_mesh);
-    // Search for at least 0.5% of the mesh size
-    constexpr double relative_minimal_search_radius = 0.005;
+    const MinGapConfig& config = min_gap_config();
+    const double relative_minimal_search_radius = config.relative_min_search_radius;
     for(FaceIndex f : _mesh.faces())
     {
       max_distances[f] = std::max(M_PI * diameters[f], relative_minimal_search_radius * ms);
@@ -173,7 +174,7 @@ namespace MeshHexer
 
     update_validity_from_neighbor_diameters(_mesh);
     update_validity_from_neighbor_normals(_mesh);
-    update_validity_from_small_angles(_mesh);
+    update_validity_from_small_angles(_mesh, config.small_angle_limit_deg);
 
     // Ensure gap scores are available
     score_gaps(_mesh);
@@ -215,7 +216,10 @@ namespace MeshHexer
     gap.bin_span = static_cast<std::uint32_t>((_monitor_hist_max_index >= _monitor_hist_min_index)
                                                ? (_monitor_hist_max_index - _monitor_hist_min_index)
                                                : 0);
-    gap.bin_span = std::max(1u, std::min(3u, gap.bin_span));
+    const MinGapConfig& config_span = min_gap_config();
+    const std::uint32_t min_span = static_cast<std::uint32_t>(config_span.min_histogram_span_bins);
+    const std::uint32_t max_span = static_cast<std::uint32_t>(config_span.max_histogram_span_bins);
+    gap.bin_span = std::max(min_span, std::min(max_span, gap.bin_span));
 
     return gap;
   }

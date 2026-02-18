@@ -30,6 +30,7 @@ add_executable(hex_VS_triangulation_intersection
   inout.f90
   TRIvsTET.f90
   cgal_bindings.f90
+  ${CMAKE_SOURCE_DIR}/common/preprocessor_config.f90
 )
 
 set_target_properties(hex_VS_triangulation_intersection

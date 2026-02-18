@@ -4,6 +4,7 @@ add_executable(meshref
   src/def.f90
   src/cleanup.f90
   src/main.f90
+  ${CMAKE_SOURCE_DIR}/common/preprocessor_config.f90
 )
 
 set_target_properties(meshref

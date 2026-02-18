@@ -2,6 +2,7 @@
 #include <limits>
 #include <macros.hpp>
 #include <properties.hpp>
+#include <meshhexer/config.hpp>
 #include <meshhexer/types.hpp>
 
 #include <boost/unordered/unordered_flat_map.hpp>
@@ -692,8 +693,9 @@ namespace MeshHexer
       return result;
     }
 
-    const double base = 3.0;
-    const double eps = 1e-12;
+    const MinGapConfig& config = min_gap_config();
+    const double base = config.monitor_histogram_base;
+    const double eps = config.monitor_histogram_eps;
     double lower = min_gap_diameter;
     double upper = min_gap_diameter * base;
 
@@ -735,7 +737,7 @@ namespace MeshHexer
       return min_gap_diameter;
     }
 
-    constexpr double target_fraction = 0.001; // 0.1%
+    const double target_fraction = min_gap_config().histogram_target_fraction;
     double total_area = 0.0;
     for(const MonitorHistogramBin& bin : bins)
     {
@@ -779,8 +781,10 @@ namespace MeshHexer
       return {0, 0};
     }
 
-    const double min_fraction_threshold = 0.001; // 0.1%
-    const double max_fraction_threshold = 0.66;  // 66%
+    const MinGapConfig& config = min_gap_config();
+    const double min_fraction_threshold = config.histogram_min_fraction_threshold;
+    const double max_fraction_threshold = config.histogram_max_fraction_threshold;
+    const std::size_t max_span = config.max_histogram_span_bins;
 
     std::size_t min_index = bins.size() - 1;
     double cumulative = 0.0;
@@ -804,7 +808,7 @@ namespace MeshHexer
     }
 
     while(
-      max_index + 1 < bins.size() && coverage < max_fraction_threshold && (max_index - min_index) < 3)
+      max_index + 1 < bins.size() && coverage < max_fraction_threshold && (max_index - min_index) < max_span)
     {
       ++max_index;
       coverage += bins[max_index].area / total_area;
@@ -894,6 +898,9 @@ namespace MeshHexer
     Mesh::Property_map<FaceIndex, std::uint32_t> validity = maybe_validity.value();
     Mesh::Property_map<FaceIndex, double> diameters = maybe_diameters.value();
 
+    const MinGapConfig& config = min_gap_config();
+    const double diameter_ratio_threshold = config.neighbor_diameter_ratio_flag;
+
     for(FaceIndex f : mesh.faces())
     {
       if(validity[f] != 0)
@@ -917,7 +924,7 @@ namespace MeshHexer
           break;
         }
 
-        if(!(diameters[neighbor] > 2.0 * current_diameter))
+        if(!(diameters[neighbor] > diameter_ratio_threshold * current_diameter))
         {
           larger_neighbors = false;
           break;
@@ -943,7 +950,8 @@ namespace MeshHexer
     Mesh::Property_map<FaceIndex, std::uint32_t> validity = maybe_validity.value();
 
     const Real normal_direction = PMP::is_outward_oriented(mesh) ? Real(-1.0) : Real(1.0);
-    const double angle_threshold = 60.0;
+    const MinGapConfig& config = min_gap_config();
+    const double angle_threshold = config.neighbor_normal_angle_limit_deg;
 
     for(FaceIndex f : mesh.faces())
     {
@@ -1070,6 +1078,8 @@ namespace MeshHexer
     MeshHexer::Mesh::Property_map<MeshHexer::FaceIndex, std::uint32_t> ids =
       mesh.property_map<MeshHexer::FaceIndex, std::uint32_t>("f:MIS_id").value();
 
+    const MinGapConfig& config = min_gap_config();
+
     MeshHexer::Mesh::Property_map<MeshHexer::FaceIndex, double> max_search_distances =
       mesh.property_map<MeshHexer::FaceIndex, double>("f:max_search_distance").value();
 
@@ -1122,11 +1132,11 @@ namespace MeshHexer
 
     auto dihedral_angle_score = [&](FaceIndex f)
     {
-      if(dihedral_angles[f] < 0.3)
+      if(dihedral_angles[f] < config.dihedral_angle_threshold_rad)
       {
         return 1.0;
       }
-      return std::sqrt(1.0 - ((dihedral_angles[f] + 0.3) / M_PI));
+      return std::sqrt(1.0 - ((dihedral_angles[f] + config.dihedral_angle_threshold_rad) / M_PI));
     };
 
     auto max_edge_length = [&](FaceIndex f)
@@ -1157,12 +1167,13 @@ namespace MeshHexer
       }
 
       if(
-        PMP::face_aspect_ratio(f, mesh) < 5.0 && PMP::face_aspect_ratio(limiting, mesh) < 5.0 &&
+        PMP::face_aspect_ratio(f, mesh) < config.face_aspect_ratio_limit &&
+        PMP::face_aspect_ratio(limiting, mesh) < config.face_aspect_ratio_limit &&
         std::find(self_intersections.begin(), self_intersections.end(), std::make_pair(f, limiting)) ==
           self_intersections.end() &&
         std::find(self_intersections.begin(), self_intersections.end(), std::make_pair(limiting, f)) ==
           self_intersections.end() &&
-        diameters[f] / max_diameter > 1e-4 && edge_ratio < 5.0)
+        diameters[f] / max_diameter > config.min_diameter_fraction && edge_ratio < config.edge_ratio_limit)
       {
         if(topo_dists[f] == -1.0 && topo_dists[FaceIndex(ids[f])] == -1.0)
         {
@@ -1230,7 +1241,8 @@ namespace MeshHexer
     MeshHexer::Mesh::Property_map<MeshHexer::FaceIndex, std::uint32_t> ids =
       mesh.property_map<MeshHexer::FaceIndex, std::uint32_t>("f:MIS_id").value();
 
-    double threshold = 0.95;
+    const MinGapConfig& config = min_gap_config();
+    double threshold = config.gap_score_threshold;
 
     std::vector<FaceIndex> candidates;
     std::copy_if(
@@ -1247,7 +1259,14 @@ namespace MeshHexer
       // Sort scores in descending order
       std::sort(percentiles.begin(), percentiles.end(), [](double a, double b) { return a > b; });
 
-      std::size_t percentile_size = std::ceil(Real(percentiles.size()) * Real(0.1));
+      const double percentile_fraction = config.score_percentile_fallback;
+      if(percentiles.empty())
+      {
+        return {FaceIndex(0), FaceIndex(0), 0.0, 0.0};
+      }
+      std::size_t percentile_size =
+        static_cast<std::size_t>(std::ceil(static_cast<double>(percentiles.size()) * percentile_fraction));
+      percentile_size = std::min(percentile_size, percentiles.size() - 1);
       double cutoff_score = *(percentiles.begin() + percentile_size);
 
       std::copy_if(

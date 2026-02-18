@@ -154,6 +154,7 @@ for idx in "${!case_paths[@]}"; do
     exit 1
   fi
   nel_display=""
+  monitor_summary=""
   if (( ${#clean_flag[@]} == 0 )); then
     filtered_tri="${case_path}/Filtered.tri"
     if [[ ! -f "${filtered_tri}" ]]; then
@@ -177,6 +178,10 @@ print(" ".join(f"{v:,}" for v in values))
 PY
     )
     nel_display=$(printf "NEL=%*s NVT=%*s" "${nel_column_width}" "${nel_fmt}" "${nel_column_width}" "${nvt_fmt}")
+    summary_file="${case_path}/monitor_summary.txt"
+    if [[ -f "${summary_file}" ]]; then
+      monitor_summary=$(<"${summary_file}")
+    fi
   fi
   end_time=$(date +%s.%N)
   elapsed_seconds=$(awk -v start="${start_time}" -v end="${end_time}" 'BEGIN { printf "%.3f", end - start }')
@@ -192,6 +197,9 @@ PY
   fi
   if [[ -n "${nel_display}" ]]; then
     printf "  :: %s" "${nel_display}"
+    if [[ -n "${monitor_summary}" ]]; then
+      printf "  %s" "${monitor_summary}"
+    fi
   fi
   printf "\n"
 done

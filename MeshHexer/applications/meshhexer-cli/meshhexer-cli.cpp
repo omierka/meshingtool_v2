@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -7,6 +8,7 @@
 
 #include <meshhexer/meshhexer.hpp>
 #include <meshhexer/types.hpp>
+#include <meshhexer/config.hpp>
 
 namespace MeshHexerCLI::Markdown
 {
@@ -30,18 +32,19 @@ namespace MeshHexerCLI
 {
   namespace
   {
-    void print_min_gap(const MeshHexer::Gap& min_gap, bool verbose)
+    void print_min_gap(const MeshHexer::Gap& min_gap, bool verbose, double coarse_mesh_size)
     {
       if(verbose)
       {
         std::cout << "Min-gap of " << min_gap.diameter << " between faces " << min_gap.face << " and " << min_gap.opposite_face << "\n";
         std::cout << "Histogram span (bins): " << min_gap.bin_span << "\n";
+        std::cout << "Suggested coarse mesh size: " << coarse_mesh_size << "\n";
         std::cout << "Use `SelectIDs(IDs=[0, " << min_gap.face << ", 0, " << min_gap.opposite_face
               << "], FieldType='CELL')` to select the chosen triangles in ParaView\n";
       }
       else
       {
-        std::cout << min_gap.diameter << " " << min_gap.bin_span << "\n";
+        std::cout << min_gap.diameter << " " << min_gap.bin_span << " " << coarse_mesh_size << "\n";
       }
     }
 
@@ -690,7 +693,9 @@ namespace MeshHexerCLI
       MeshHexer::SurfaceMesh mesh = std::move(result).take_ok();
 
       MeshHexer::Gap min_gap = mesh.min_gap();
-      print_min_gap(min_gap, params.verbose);
+      const double coarse_mesh_size = min_gap.diameter * MeshHexer::min_gap_config().coarse_mesh_scaling *
+        std::pow(3.0, static_cast<double>(min_gap.bin_span));
+      print_min_gap(min_gap, params.verbose, coarse_mesh_size);
 
       if(!gparams.checkpoint_path.empty())
       {

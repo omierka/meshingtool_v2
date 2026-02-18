@@ -1,6 +1,8 @@
 module bc_treatment
     use iso_c_binding, only: c_double, c_int
     use setupe3dfile_reader, only: MeshConfig, ProcessParameters, ProcessInflow
+    use preprocessor_config_mod, only: get_cylinder_boundary_tolerance_factor, &
+        get_box_boundary_tolerance_factor, get_tolerance_floor, get_inflow_orientation_threshold
     implicit none
     private
 
@@ -173,6 +175,7 @@ contains
         type(HollowCylinderBoundaryClassification), intent(out) :: classification
 
         real(c_double) :: outer_radius, inner_radius, axial_min, axial_max
+        real(c_double) :: tolerance_factor
         logical :: have_outer, have_inner, have_axial_min, have_axial_max
         integer :: face_count
         integer :: face_idx
@@ -184,7 +187,8 @@ contains
         logical, allocatable :: inflow_face_mask(:)
 
         classification%min_edge_length = compute_min_edge_length(coords, kvert)
-        classification%tolerance = 0.90_c_double * classification%min_edge_length
+        tolerance_factor = real(get_cylinder_boundary_tolerance_factor(), kind=c_double)
+        classification%tolerance = tolerance_factor * classification%min_edge_length
         classification%total_boundary_nodes = count(knpr == 1_c_int)
         call allocate_zero_length_list(classification%cyl_outer_nodes)
         call allocate_zero_length_list(classification%cyl_inner_nodes)
@@ -305,6 +309,7 @@ contains
 
         real(c_double) :: start(3), lengths(3)
         real(c_double) :: plane_values(6)
+        real(c_double) :: tolerance_factor
         logical :: have_start, have_length
         integer :: face_count
         integer :: face_idx
@@ -315,7 +320,8 @@ contains
         real(c_double), allocatable :: face_normals(:, :)
 
         classification%min_edge_length = compute_min_edge_length(coords, kvert)
-        classification%tolerance = 0.5_c_double * classification%min_edge_length
+        tolerance_factor = real(get_box_boundary_tolerance_factor(), kind=c_double)
+        classification%tolerance = tolerance_factor * classification%min_edge_length
         classification%total_boundary_nodes = count(knpr == 1_c_int)
         call allocate_zero_length_list(classification%x_min_nodes)
         call allocate_zero_length_list(classification%x_max_nodes)
@@ -455,7 +461,7 @@ contains
         if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
         allocate(classification%inflow_groups(inflow_count))
         allocate(mask(face_count))
-        eps = max(tolerance, 1.0e-12_c_double)
+        eps = max(tolerance, real(get_tolerance_floor(), kind=c_double))
 
         do inflow_idx = 1, inflow_count
             call init_face_list(classification%inflow_groups(inflow_idx)%faces)
@@ -531,7 +537,7 @@ contains
         if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
         allocate(classification%inflow_groups(inflow_count))
         allocate(mask(face_count))
-        eps = max(tolerance, 1.0e-12_c_double)
+        eps = max(tolerance, real(get_tolerance_floor(), kind=c_double))
 
         do inflow_idx = 1, inflow_count
             call init_face_list(classification%inflow_groups(inflow_idx)%faces)
@@ -601,16 +607,18 @@ contains
         real(c_double) :: dist, vec_p(3), vec_a(3), vec_b(3), mirrored(3)
         real(c_double) :: dAux1, dAux2, dAdC, dBdC, dPdA, dPdB, radius
         real(c_double) :: normal_norm, inflow_norm, dotval
+        real(c_double) :: orientation_threshold
         logical :: orientation_ok, condition_met
 
         is_inside = .false.
         orientation_ok = .false.
+        orientation_threshold = real(get_inflow_orientation_threshold(), kind=c_double)
         normal_norm = norm2_vec(face_normal)
         inflow_norm = 0.0_c_double
         if (inflow%has_normal) inflow_norm = norm2_vec(inflow%normal)
         if (normal_norm > 0.0_c_double .and. inflow_norm > 0.0_c_double) then
             dotval = abs(dot_product(face_normal / normal_norm, inflow%normal / inflow_norm))
-            orientation_ok = (dotval > 0.99_c_double)
+            orientation_ok = (dotval > orientation_threshold)
         end if
         if (.not. orientation_ok) return
 

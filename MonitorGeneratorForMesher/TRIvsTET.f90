@@ -8,6 +8,7 @@ module tri_tet_intersection
   public :: tri_hex_intersections, hexa_tet_node_indices
   public :: compute_hex_bounding_sphere, gather_triangles_in_sphere
   public :: compute_hex_subdivision_points
+  public :: set_preprocessor_tolerances
   public :: num_hex_tets, num_hex_sub_vertices
 
   integer, parameter :: dp = c_double
@@ -78,6 +79,9 @@ module tri_tet_intersection
        8, 26, 19, 24, &
        8, 25, 24, 16, &
       26, 24, 25, 27 ], [4, num_hex_tets])
+
+  real(dp) :: bounding_box_tolerance = 1.0e-12_dp
+  real(dp) :: clipping_epsilon = 1.0e-12_dp
 
 contains
 
@@ -198,6 +202,12 @@ contains
       end if
     end do
   end subroutine
+
+  subroutine set_preprocessor_tolerances(bbox_tol, clip_tol)
+    real(dp), intent(in) :: bbox_tol, clip_tol
+    if (bbox_tol > 0.0_dp) bounding_box_tolerance = bbox_tol
+    if (clip_tol > 0.0_dp) clipping_epsilon = clip_tol
+  end subroutine set_preprocessor_tolerances
 
   subroutine compact_polygon(p, n, eps)
     ! Remove near-duplicate consecutive points (and closing duplicate)
@@ -565,15 +575,14 @@ contains
 
   pure logical function point_inside_bbox(bbox_min, bbox_max, p)
     real(dp), intent(in) :: bbox_min(3), bbox_max(3), p(3)
-    real(dp), parameter :: tol = 1.0d-12
     integer :: i
     point_inside_bbox = .true.
     do i = 1, 3
-      if (p(i) < bbox_min(i) - tol) then
+      if (p(i) < bbox_min(i) - bounding_box_tolerance) then
         point_inside_bbox = .false.
         return
       end if
-      if (p(i) > bbox_max(i) + tol) then
+      if (p(i) > bbox_max(i) + bounding_box_tolerance) then
         point_inside_bbox = .false.
         return
       end if
@@ -648,11 +657,10 @@ contains
   pure logical function triangle_intersects_sphere(center, radius, p1, p2, p3)
     real(dp), intent(in) :: center(3), radius
     real(dp), intent(in) :: p1(3), p2(3), p3(3)
-    real(dp) :: dist2, rsq, eps
-    eps = 1.0e-12_dp
+    real(dp) :: dist2, rsq
     rsq = radius*radius
     dist2 = point_triangle_distance2(center, p1, p2, p3)
-    triangle_intersects_sphere = (dist2 <= rsq + eps)
+    triangle_intersects_sphere = (dist2 <= rsq + clipping_epsilon)
   end function triangle_intersects_sphere
 
   pure real(dp) function point_triangle_distance2(p, a, b, c)
@@ -733,11 +741,12 @@ contains
 
     real(dp) :: best_center(3), temp_center(3)
     real(dp) :: best_radius, temp_radius
-    real(dp), parameter :: eps = 1.0e-12_dp
+    real(dp) :: eps
     integer :: i, j, k, l
     logical :: success, contains, found
 
     best_radius = huge(1.0_dp)
+    eps = clipping_epsilon
     found = .false.
 
     if (npts <= 0) then
@@ -910,11 +919,12 @@ contains
     logical, intent(out) :: success
     real(dp) :: A(3,3), bvec(3), factor
     integer :: i, j, pivot
-    real(dp), parameter :: eps = 1.0e-12_dp
+    real(dp) :: eps
 
     A = Ain
     bvec = bin
     success = .false.
+    eps = clipping_epsilon
 
     do i = 1, 3
       pivot = i
