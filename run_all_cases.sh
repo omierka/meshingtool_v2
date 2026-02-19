@@ -114,6 +114,8 @@ mindist_placeholder="mindist=999.999"
 mindist_column_width=${#mindist_placeholder}
 nel_placeholder="99,999,999"
 nel_column_width=${#nel_placeholder}
+iteration_pad_reference="*[2][3][4][5][6]"
+iteration_pad_len=${#iteration_pad_reference}
 
 for idx in "${!case_paths[@]}"; do
   case_path="${case_paths[$idx]}"
@@ -128,6 +130,7 @@ for idx in "${!case_paths[@]}"; do
   "${runner}" -s -f "CASES/${case_name}" -n "${num_proc}" "${clean_flag[@]}" > "${stage_pipe}" &
   runner_pid=$!
   mindist_value=""
+  saw_second_iteration=0
   while IFS= read -r stage_line; do
     if [[ "${stage_line}" == mindist=* ]]; then
       mindist_value="${stage_line#mindist=}"
@@ -140,6 +143,8 @@ for idx in "${!case_paths[@]}"; do
     elif [[ "${stage_line}" == CoarseMeshSize=* ]]; then
       stage_output+="${stage_line}"$'\n'
       continue
+    elif [[ "${stage_line}" == "*" ]]; then
+      saw_second_iteration=1
     fi
     printf "%s" "${stage_line}"
     stage_output+="${stage_line}"$'\n'
@@ -194,7 +199,11 @@ PY
   end_time=$(date +%s.%N)
   elapsed_seconds=$(awk -v start="${start_time}" -v end="${end_time}" 'BEGIN { printf "%.3f", end - start }')
   time_str=$(printf "%s [s]" "${elapsed_seconds}")
-  printf " :: %${time_column_width}s" "${time_str}"
+  printf " :: "
+  if (( saw_second_iteration == 0 )); then
+    printf "%*s" "${iteration_pad_len}" ""
+  fi
+  printf "%${time_column_width}s" "${time_str}"
   if (( ${#clean_flag[@]} == 0 )) && [[ -n "${mindist_value}" ]]; then
     mindist_formatted=$(awk -v val="${mindist_value}" 'BEGIN { printf "%.3f", val }')
     if [[ -n "${span_value}" ]]; then
