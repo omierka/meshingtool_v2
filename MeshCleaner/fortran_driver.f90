@@ -136,6 +136,7 @@ program fortran_cgal_demo
     integer(c_int), allocatable :: filtered_kvert(:, :)
     integer(c_int), allocatable :: filtered_knpr(:)
     integer(c_int), allocatable :: filtered_monitor(:)
+    real(c_double), allocatable :: filtered_volumes(:)
     integer :: filtered_nel, filtered_nvt
     logical :: element_selected, vertex_inside, all_vertices_inside
     integer :: inside_vertex_count
@@ -154,6 +155,7 @@ program fortran_cgal_demo
     logical :: hc_summary_ready, box_summary_ready
     character(len=512) :: mesh_output_folder
     character(len=512) :: monitor_summary_file
+    character(len=512) :: monitor_volume_file
     character(len=512), allocatable :: meshdir_files(:)
     integer :: meshdir_file_count
     integer :: mpi_rank, mpi_size, mpi_err
@@ -163,6 +165,7 @@ program fortran_cgal_demo
     integer, parameter :: MONITOR_BUCKETS = 4
     logical :: monitor_data_available, use_vtu_input
     integer :: monitor_hist_before(MONITOR_BUCKETS), monitor_hist_after(MONITOR_BUCKETS)
+    real(c_double) :: monitor_volume_hist(MONITOR_BUCKETS)
 
     surface_file = "sphere.off"
     hex_file = "single.tri"
@@ -178,6 +181,7 @@ program fortran_cgal_demo
     monitor_data_available = .false.
     monitor_hist_before = 0
     monitor_hist_after = 0
+    monitor_volume_hist = 0.0_c_double
 
     call MPI_Init(mpi_err)
     if (mpi_err /= MPI_SUCCESS) then
@@ -235,6 +239,10 @@ program fortran_cgal_demo
     if (use_vtu_input) then
         call read_vtu_hex(trim(hex_file), hex_nel, hex_nvt, hex_nve, hex_nbct, hex_nee, hex_nae, header_line1, header_line2, &
                           hex_coords, hex_kvert, hex_knpr, hex_monitor, monitor_data_available)
+        hex_nbct = 1
+        hex_nve = 8
+        hex_nee = 12
+        hex_nae = 6
     else
         call read_single_tri(trim(hex_file), hex_nel, hex_nvt, hex_nve, hex_nbct, hex_nee, hex_nae, header_line1, header_line2, &
                              hex_coords, hex_kvert, hex_knpr)
@@ -367,9 +375,6 @@ program fortran_cgal_demo
         if (monitor_data_available) then
             call compute_monitor_histogram_masked(hex_monitor, intersect_mask, monitor_hist_after)
             call print_monitor_distribution("[MONITOR_AFTER]", monitor_hist_after, intersect_count)
-            call ensure_directory_exists(output_folder)
-            call build_config_path(trim(output_folder), "monitor_summary.txt", monitor_summary_file)
-            call write_monitor_summary_file(trim(monitor_summary_file), monitor_hist_after, intersect_count)
         end if
     end if
 
@@ -385,6 +390,11 @@ program fortran_cgal_demo
         else
             call reduce_hex_mesh(intersect_mask, hex_coords, hex_kvert, hex_knpr, hex_nve, filtered_coords, &
                                  filtered_kvert, filtered_knpr, filtered_nel, filtered_nvt)
+        end if
+        if (monitor_data_available) then
+            call compute_hexahedron_volumes(filtered_coords, filtered_kvert, filtered_volumes)
+            call compute_monitor_volume_histogram(filtered_monitor, filtered_volumes, monitor_volume_hist)
+            if (allocated(filtered_volumes)) deallocate(filtered_volumes)
         end if
         call recompute_knpr_from_connectivity(filtered_kvert, filtered_knpr, boundary_faces)
         if (mesh_config%loaded) then
@@ -418,6 +428,14 @@ program fortran_cgal_demo
     if (is_master) elapsed_time = MPI_Wtime() - start_time
 
     call cgal_free_mesh(mesh_handle)
+
+    if (is_master .and. monitor_data_available) then
+        call ensure_directory_exists(output_folder)
+        call build_config_path(trim(output_folder), "monitor_summary.txt", monitor_summary_file)
+        call write_monitor_summary_file(trim(monitor_summary_file), monitor_hist_after, intersect_count)
+        call build_config_path(trim(output_folder), "monitor_summary_volumetric.txt", monitor_volume_file)
+        call write_monitor_volume_summary_file(trim(monitor_volume_file), monitor_volume_hist)
+    end if
 
     if (is_master) then
         write (*, '(A,I0,1X,A,I0,1X,A,I0,1X,A,I0,1X,A,I0)') '[DISCARDED]=', count_discarded, '[INTERSECTED]=', &
@@ -794,6 +812,22 @@ contains
         end do
     end subroutine compute_monitor_histogram_masked
 
+    subroutine compute_monitor_volume_histogram(monitor_values, volumes, histogram)
+        integer(c_int), intent(in) :: monitor_values(:)
+        real(c_double), intent(in) :: volumes(:)
+        real(c_double), intent(out) :: histogram(MONITOR_BUCKETS)
+        integer :: idx, bucket
+
+        if (size(monitor_values) /= size(volumes)) error stop "Monitor volume histogram size mismatch."
+        histogram = 0.0_c_double
+        do idx = 1, size(monitor_values)
+            bucket = int(monitor_values(idx))
+            if (bucket >= 0 .and. bucket < MONITOR_BUCKETS) then
+                histogram(bucket + 1) = histogram(bucket + 1) + max(volumes(idx), 0.0_c_double)
+            end if
+        end do
+    end subroutine compute_monitor_volume_histogram
+
     subroutine print_monitor_distribution(label, histogram, total_count)
         character(len=*), intent(in) :: label
         integer, intent(in) :: histogram(MONITOR_BUCKETS)
@@ -821,10 +855,28 @@ contains
         pct = 0.0_c_double
         pct = 100.0_c_double * real(histogram, kind=c_double) / denom
         open(newunit=unit, file=trim(filepath), status="replace", action="write")
-        write(unit,'("MONITOR_AFTER ", "0=[",F5.1,"%]",1X,"1=[",F5.1,"%]",1X,"2=[",F5.1,"%]",1X,"3=[",F5.1,"%]")') &
+        write(unit,'("MONITOR_AFTER_COUNT ", "0=[",F5.1,"%]",1X,"1=[",F5.1,"%]",1X,"2=[",F5.1,"%]",1X,"3=[",F5.1,"%]")') &
             pct(1), pct(2), pct(3), pct(4)
         close(unit)
     end subroutine write_monitor_summary_file
+
+    subroutine write_monitor_volume_summary_file(filepath, volume_histogram)
+        character(len=*), intent(in) :: filepath
+        real(c_double), intent(in) :: volume_histogram(MONITOR_BUCKETS)
+        integer :: unit
+        real(c_double) :: vol_pct(MONITOR_BUCKETS), volume_total
+
+        volume_total = sum(volume_histogram)
+        if (volume_total <= 0.0_c_double) then
+            vol_pct = 0.0_c_double
+        else
+            vol_pct = 100.0_c_double * volume_histogram / volume_total
+        end if
+        open(newunit=unit, file=trim(filepath), status="replace", action="write")
+        write(unit,'("MONITOR_AFTER_VOLUME ", "0=[",F5.1,"%]",1X,"1=[",F5.1,"%]",1X,"2=[",F5.1,"%]",1X,"3=[",F5.1,"%]")') &
+            vol_pct(1), vol_pct(2), vol_pct(3), vol_pct(4)
+        close(unit)
+    end subroutine write_monitor_volume_summary_file
 
     pure function to_lower_char(ch) result(lower)
         character(len=1), intent(in) :: ch
@@ -1303,6 +1355,68 @@ contains
         write(unit, '(A)') '</VTKFile>'
         close(unit)
     end subroutine write_vtu
+
+    subroutine compute_hexahedron_volumes(coords, kvert, volumes)
+        real(c_double), intent(in) :: coords(:, :)
+        integer(c_int), intent(in) :: kvert(:, :)
+        real(c_double), allocatable, intent(out) :: volumes(:)
+
+        integer, parameter :: local_faces(4, 6) = reshape([ &
+            1, 2, 3, 4, &
+            5, 6, 7, 8, &
+            1, 2, 6, 5, &
+            2, 3, 7, 6, &
+            3, 4, 8, 7, &
+            4, 1, 5, 8], [4, 6])
+        integer :: nel, nve, cell_idx, face_idx
+        integer :: v1, v2, v3, v4, local_idx
+        integer :: vertex_id
+        real(c_double) :: cell_coords(3, 8)
+        real(c_double) :: centroid(3)
+        real(c_double) :: volume_sum
+
+        nve = size(kvert, 1)
+        if (nve /= 8) error stop "Hex volume computation expects 8-node elements."
+        nel = size(kvert, 2)
+        allocate(volumes(nel))
+        volumes = 0.0_c_double
+        if (nel == 0) return
+
+        do cell_idx = 1, nel
+            centroid = 0.0_c_double
+            do local_idx = 1, nve
+                vertex_id = int(kvert(local_idx, cell_idx))
+                if (vertex_id < 1 .or. vertex_id > size(coords, 2)) error stop "Invalid vertex index in hex volume."
+                cell_coords(:, local_idx) = coords(:, vertex_id)
+                centroid = centroid + cell_coords(:, local_idx)
+            end do
+            centroid = centroid / 8.0_c_double
+            volume_sum = 0.0_c_double
+            do face_idx = 1, size(local_faces, 2)
+                v1 = local_faces(1, face_idx)
+                v2 = local_faces(2, face_idx)
+                v3 = local_faces(3, face_idx)
+                v4 = local_faces(4, face_idx)
+                volume_sum = volume_sum + tetrahedron_volume(centroid, cell_coords(:, v1), cell_coords(:, v2), cell_coords(:, v3))
+                volume_sum = volume_sum + tetrahedron_volume(centroid, cell_coords(:, v1), cell_coords(:, v3), cell_coords(:, v4))
+            end do
+            volumes(cell_idx) = volume_sum
+        end do
+    end subroutine compute_hexahedron_volumes
+
+    pure function tetrahedron_volume(a, b, c, d) result(volume)
+        real(c_double), intent(in) :: a(3), b(3), c(3), d(3)
+        real(c_double) :: volume
+        real(c_double) :: ab(3), ac(3), ad(3), cross_prod(3)
+
+        ab = b - a
+        ac = c - a
+        ad = d - a
+        cross_prod(1) = ac(2) * ad(3) - ac(3) * ad(2)
+        cross_prod(2) = ac(3) * ad(1) - ac(1) * ad(3)
+        cross_prod(3) = ac(1) * ad(2) - ac(2) * ad(1)
+        volume = abs(ab(1) * cross_prod(1) + ab(2) * cross_prod(2) + ab(3) * cross_prod(3)) / 6.0_c_double
+    end function tetrahedron_volume
 
     subroutine filter_intersection_via_edges(mesh_handle, elem_idx, coords, element_selected)
         type(c_ptr), intent(in) :: mesh_handle

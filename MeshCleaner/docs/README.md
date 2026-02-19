@@ -3,7 +3,7 @@
 This project demonstrates how to expose a subset of CGAL’s C++ API to Fortran via `ISO_C_BINDING` and then run a full hex-mesh filtering pipeline in Fortran.  The workflow is split into two parts:
 
 1. `src/cgal_interface.cpp` loads an OFF surface with CGAL, triangulates it, and exposes a small C API to query raw vertex/triangle buffers.
-2. `src/fortran_driver.f90` (with helpers in `src/bc_treatment.f90`) reads the hexahedral mesh, calls the CGAL wrapper, filters elements, recomputes boundary flags, classifies boundary faces, and writes all derived outputs.
+2. `src/fortran_driver.f90` (with helpers in `src/bc_treatment.f90`) reads the hexahedral mesh (either the legacy `*.tri` format or ASCII VTK `*.vtu` hexahedra), calls the CGAL wrapper, filters elements, recomputes boundary flags, classifies boundary faces, and writes all derived outputs.
 
 The driver understands the two supported parametrisations today—**HollowCylinder** and **Box**—and can be extended as new mesh types appear.
 
@@ -28,10 +28,10 @@ The binary lives at `./build/src/fortran_cgal`.  Useful flags:
 
 | Flag | Meaning |
 |------|---------|
-| `-h`, `--hex` | Path to the input *.tri hexahedral mesh. |
+| `-h`, `--hex` | Path to the input hexahedral mesh (`*.tri` or ASCII `*.vtu`). |
 | `-t`, `--tri` | Path to the OFF surface mesh used for filtering. |
 | `-s`, `--hex-scale` | Optional scale applied to the *input* hex mesh prior to filtering (defaults to 1.0). |
-| `-o`, `--output-folder` | Directory that contains `MESHCONFIG.dat` and receives outputs.  The driver creates `<output>/meshDir` automatically. |
+| `-o`, `--output-folder` | Directory that contains `setup.e3d` and receives outputs.  The driver creates `<output>/meshDir` automatically. |
 
 Example:
 
@@ -44,15 +44,23 @@ mpirun -np 8 ./build/src/fortran_cgal \
     -o PROFEX
 ```
 
-When `-o` is supplied the driver expects `<output>/MESHCONFIG.dat`.  That INI-style file describes the originating mesh (Box or HollowCylinder), the overall bounding box/barrel, and the element spacing.  The parser lives in `bc_treatment.f90` and normalises section/key names, so the same format can be used for future mesh families.
+When `-o` is supplied the driver looks for `<output>/setup.e3d`.  That file (the standard pre-processor export) stores both the mesh description (Box or HollowCylinder plus sizing) and the process inflow definitions inside the `[E3DGeometryData/PreProcessing]` section.  The parser lives in `setupe3dfile_reader.f90`.
 
 The driver now requires at least **two** MPI ranks: rank 0 handles orchestration/output only, while ranks ≥1 process the hexahedral workload. Rank 0 still reduces the filtered mesh, writes files, and prints the boundary summaries.
 
+### VTU input support
+
+- `-h/--hex` can point to either a `.tri` file or an ASCII `.vtu` UnstructuredGrid.  Detection is purely extension-based.
+- Only `VTK_HEXAHEDRON` cells (type id `12`) are supported.  Connectivity arrays are read as-is and converted to 1-based indexing.
+- The driver looks for a `KNPR` point-data array and a `monitor` cell-data array.  If either one is absent the values are initialised to zero, so older `.vtu` exports work without modification.
+- When `monitor` data exists it is histogrammed before/after filtering and written to `<output>/monitor_summary.txt`.  The filtered `monitor` values are also propagated to the exported `Filtered.vtu`.
+- VTU meshes do not carry the legacy `NEL,NVT,NBCT,NVE,NEE,NAE` header tuple used by `.tri` files, so `Filtered.tri` is emitted with the conventional defaults `1 8 12 6` for the last four values (only when the input was VTU; `.tri` inputs preserve their original header).
+
 ## Filtering pipeline
 
-1. The driver reads the hexahedral mesh, rescales the coordinates (if `-s` is set), and loads the OFF surface through CGAL.
+1. The driver reads the hexahedral mesh from `.tri` or `.vtu`, rescales the coordinates (if `-s` is set), and loads the OFF surface through CGAL.
 2. For each hexahedron a minimal bounding sphere is computed; elements whose spheres intersect the surface, contain vertices inside the surface, or whose centres lie inside the surface are marked as “kept”.
-3. The connectivity and coordinates are then reduced to the kept elements. `Filtered.vtu` receives the unscaled coordinates, while `meshDir/Filtered.tri` is written with coordinates multiplied by 0.1 (as required by the consuming tooling).
+3. The connectivity and coordinates are then reduced to the kept elements. `Filtered.vtu` receives the unscaled coordinates (and carries `KNPR` plus any incoming `monitor` data), while `meshDir/Filtered.tri` is written with coordinates multiplied by 0.1 (as required by the consuming tooling).
 4. Boundary flags (`KNPR`) are recomputed: every hexahedral face is tracked, and the vertices belonging to faces that only appear once in the mesh receive `KNPR=1`.
 
 ## Boundary classification and outputs
@@ -74,11 +82,13 @@ The helper module `bc_treatment.f90` owns the classification logic:
 
 Outside of `meshDir` we also emit `<output>/Filtered.vtu`, which contains the filtered cells with the original scale and the recomputed `KNPR` array: it’s a convenient ParaView/VTK representation for inspection.
 
+When a `.vtu` input provided `monitor` cell data you will additionally see `<output>/monitor_summary.txt` (count-based distribution) and `<output>/monitor_summary_volumetric.txt` (volume-weighted distribution) for the four monitor buckets.
+
 ## Summary
 
 Between the CGAL wrapper and the Fortran driver you get a reproducible “load, filter, classify, export” pipeline:
 
 1. Build once via `cmake` (or `runner.sh`).
-2. Provide a hexahedral mesh, an OFF surface, and a `MESHCONFIG.dat`.
+2. Provide a hexahedral mesh (`.tri` or `.vtu`), an OFF surface, and a `setup.e3d`.
 3. Run `fortran_cgal` with `-h`, `-t`, `-s`, and `-o`.
 4. Collect `Filtered.vtu`, `meshDir/Filtered.tri`, all parametrisation `.par` files, and the `file.prj` inventory for downstream tooling.

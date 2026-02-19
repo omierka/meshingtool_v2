@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Render Filtered.vtu snapshots for every case that provides a view.pvsm file.
+Render Filtered.vtu snapshots for every case that provides a view.pvsm file and
+assemble a PDF report with LaTeX.
 
-The script loads ParaView via the module system before dispatching pvbatch for
-each case:
-
-    python render_all_snapshots.py
-
-To skip the module load step, pass --module "" (empty string).
+Usage:
+    python render_all_snapshots.py --cases-root CASES
 """
 
 import argparse
+import re
 import shlex
 import shutil
 import subprocess
@@ -25,8 +23,9 @@ OUTPUT_FILE = "Filtered.png"
 SURFACE_FILE = "surface.off"
 SURFACE_OUTPUT_FILE = "Surface.png"
 DEFAULT_MODULE = "paraview/5.13.0/opengl2-renderer/gui"
-A4_WIDTH = 2480
-A4_HEIGHT = 3508
+IMAGE_HEIGHT_SHARE = 0.78  # fraction of page height reserved for case images
+LATEX_MONITOR_CAPTION = r"\textrm{Element monitor distribution (\% of kept elements)}"
+CaseRecord = Tuple[Path, Path, Optional[Path], Optional[str], Optional[str], Optional[str]]
 
 
 def _parse_arguments(script_dir: Path) -> argparse.Namespace:
@@ -62,15 +61,19 @@ def _parse_arguments(script_dir: Path) -> argparse.Namespace:
         help="Skip cases where the output PNG already exists.",
     )
     parser.add_argument(
-        "--legacy-layout",
+        "--skip-render",
         action="store_true",
-        help="Render PDF pages using the original montage layout instead of A4 pages.",
+        help="Reuse existing Filtered/Surface PNGs and skip pvbatch rendering.",
+    )
+    parser.add_argument(
+        "--keep-temp",
+        action="store_true",
+        help="Preserve the temporary LaTeX workspace/images instead of deleting them.",
     )
     return parser.parse_args()
 
 
 def _candidate_case_dirs(cases_root: Path) -> List[Path]:
-    """Return either the single case (if the root is one) or its subdirectories."""
     single_case_state = cases_root / STATE_FILE
     if single_case_state.is_file():
         return [cases_root]
@@ -140,7 +143,6 @@ def _build_batch_command(
 
 
 def _trim_image(image_path: Path) -> bool:
-    """Trim whitespace from the image using ImageMagick."""
     if not image_path.is_file():
         return False
     cmd = ["convert", str(image_path), "-trim", "+repage", str(image_path)]
@@ -151,14 +153,19 @@ def _trim_image(image_path: Path) -> bool:
     return True
 
 
-def _load_monitor_summary(case_dir: Path) -> Optional[str]:
+def _load_monitor_summary(case_dir: Path) -> Tuple[Optional[str], Optional[str]]:
     summary_path = case_dir / "monitor_summary.txt"
-    if not summary_path.is_file():
-        return None
-    try:
-        return summary_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
+    volume_path = case_dir / "monitor_summary_volumetric.txt"
+
+    def _read(path: Path) -> Optional[str]:
+        if not path.is_file():
+            return None
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+
+    return _read(summary_path), _read(volume_path)
 
 
 def _extract_nel(case_dir: Path) -> Optional[str]:
@@ -169,108 +176,184 @@ def _extract_nel(case_dir: Path) -> Optional[str]:
         for line in header_path.open("r", encoding="utf-8", errors="ignore"):
             if "NEL" in line:
                 parts = line.strip().split()
-                if not parts:
-                    continue
-                try:
-                    int(parts[0])
-                    return parts[0]
-                except ValueError:
-                    continue
+                if parts:
+                    try:
+                        int(parts[0])
+                        return parts[0]
+                    except ValueError:
+                        continue
     except OSError:
         return None
     return None
 
 
-def _create_pdf_page(
-    case_name: str,
-    summary: Optional[str],
-    nel: Optional[str],
-    images: Sequence[Path],
-    output_path: Path,
-    legacy_layout: bool,
-) -> bool:
-    inputs = [str(image) for image in images if image.is_file()]
-    if not inputs:
-        return False
-    tile = f"1x{len(inputs)}"
-    cmd = [
-        "montage",
-        *inputs,
-        "-tile",
-        tile,
-        "-geometry",
-        "+20+20",
-        "-background",
-        "white",
-        "-title",
-        "\n".join(filter(None, [case_name, f"NEL={nel}" if nel else None, summary])) if (summary or nel) else case_name,
-        str(output_path),
-    ]
-    if legacy_layout:
-        result = subprocess.run(cmd, check=False)
-        return result.returncode == 0
+def _latex_escape(text: str) -> str:
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(ch, ch) for ch in text)
 
-    tmp_image = output_path.with_suffix(".tmp.png")
-    result = subprocess.run([*cmd[:-1], str(tmp_image)], check=False)
-    if result.returncode != 0:
-        return False
-    image_info = subprocess.run(
-        ["identify", "-format", "%w %h", str(tmp_image)], capture_output=True, text=True, check=False
-    )
-    if image_info.returncode != 0:
-        tmp_image.unlink(missing_ok=True)
-        return False
-    width_str, height_str = image_info.stdout.strip().split()
-    width = int(width_str)
-    height = int(height_str)
 
-    scale_factor = min(A4_WIDTH / width, A4_HEIGHT / height)
-    resize_arg = f"{int(width * scale_factor)}x{int(height * scale_factor)}!"
-    convert_cmd = [
-        "convert",
-        str(tmp_image),
-        "-resize",
-        resize_arg,
-        "-background",
-        "white",
-        "-gravity",
-        "center",
-        "-extent",
-        f"{A4_WIDTH}x{A4_HEIGHT}",
-        str(output_path),
+def _parse_monitor_values(summary: Optional[str]) -> Optional[List[str]]:
+    if not summary:
+        return None
+    matches = re.findall(r"([0-3])=\[\s*([0-9.\-]+)%\]", summary)
+    if len(matches) != 4:
+        return None
+    values = [""] * 4
+    for bin_id, pct_text in matches:
+        try:
+            pct_value = float(pct_text)
+        except ValueError:
+            return None
+        values[int(bin_id)] = f"{pct_value:.1f}\\%"
+    return values
+
+
+def _latex_monitor_table(
+    count_values: Optional[List[str]], volume_values: Optional[List[str]]
+) -> List[str]:
+    rows: List[Tuple[str, Optional[List[str]]]] = []
+    if count_values:
+        rows.append(("Count", count_values))
+    if volume_values:
+        rows.append(("Volume", volume_values))
+    if not rows:
+        return []
+
+    def _prepare(values: Optional[List[str]]) -> List[str]:
+        if not values:
+            return ["--"] * 4
+        return [val if val else "--" for val in values]
+
+    lines = [
+        r"\begin{tabular}{lcccc}",
+        r"\textbf{Method\textbackslash Bin} & \textbf{0} & \textbf{1} & \textbf{2} & \textbf{3} \\ \hline",
     ]
-    convert_result = subprocess.run(convert_cmd, check=False)
-    try:
-        tmp_image.unlink()
-    except OSError:
-        pass
-    return convert_result.returncode == 0
+    for label, vals in rows:
+        prepared = _prepare(vals)
+        lines.append(
+            "%s & %s & %s & %s & %s \\\\" % (
+                _latex_escape(label),
+                prepared[0],
+                prepared[1],
+                prepared[2],
+                prepared[3],
+            )
+        )
+    lines.append(r"\end{tabular}")
+    return lines
 
 
 def _build_cases_pdf(
-    successful_cases: Sequence[Tuple[Path, Path, Optional[Path], Optional[str], Optional[str]]],
+    successful_cases: Sequence[CaseRecord],
     output_pdf: Path,
-    legacy_layout: bool,
+    keep_temp: bool,
 ) -> bool:
-    tmp_dir = Path(tempfile.mkdtemp(prefix="cases_pdf_"))
-    page_paths: List[Path] = []
+    tex_root = Path(tempfile.mkdtemp(prefix="cases_pdf_tex_"))
+    tex_dir = tex_root / "tex"
+    tex_dir.mkdir(parents=True, exist_ok=True)
+    entries: List[dict] = []
     try:
-        for idx, (case_dir, filtered, surface, summary, nel) in enumerate(successful_cases):
-            images = [filtered]
-            if surface and surface.is_file():
-                images.append(surface)
-            page_path = tmp_dir / f"page_{idx:04d}.png"
-            if _create_pdf_page(case_dir.name, summary, nel, images, page_path, legacy_layout):
-                page_paths.append(page_path)
-            else:
-                print(f"Failed to build PDF page for {case_dir}", file=sys.stderr)
-        if not page_paths:
+        for idx, (case_dir, filtered, surface, summary_count, summary_volume, nel) in enumerate(successful_cases):
+            images: List[str] = []
+            for image_idx, source in enumerate([filtered, surface] if surface else [filtered]):
+                if source is None or not source.is_file():
+                    continue
+                dest = tex_dir / f"case_{idx:04d}_img{image_idx:02d}{source.suffix.lower()}"
+                try:
+                    shutil.copy2(source, dest)
+                except OSError as exc:
+                    print(f"Failed to copy {source} -> {dest}: {exc}", file=sys.stderr)
+                    return False
+                images.append(dest.name)
+            entries.append(
+                {
+                    "case_name": case_dir.name,
+                    "nel": nel,
+                    "summary_count": summary_count,
+                    "summary_volume": summary_volume,
+                    "images": images,
+                }
+            )
+
+        tex_content = _render_latex_document(entries)
+        tex_path = tex_dir / "report.tex"
+        tex_path.write_text(tex_content, encoding="utf-8")
+        pdflatex = shutil.which("pdflatex")
+        if pdflatex is None:
+            print("pdflatex executable not found in PATH.", file=sys.stderr)
             return False
-        cmd = ["convert", *[str(page) for page in page_paths], str(output_pdf)]
-        result = subprocess.run(cmd, check=False)
-        return result.returncode == 0
+        cmd = [pdflatex, "-interaction=nonstopmode", tex_path.name]
+        result = subprocess.run(cmd, cwd=tex_dir, check=False)
+        if result.returncode != 0:
+            print("Failed to build PDF via pdflatex.", file=sys.stderr)
+            return False
+        pdf_path = tex_dir / "report.pdf"
+        if not pdf_path.is_file():
+            print("pdflatex did not produce report.pdf.", file=sys.stderr)
+            return False
+        shutil.move(str(pdf_path), str(output_pdf))
+        return True
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if keep_temp and tex_root.exists():
+            print(f"[debug] Keeping LaTeX workspace under {tex_root}")
+        elif tex_root.exists():
+            shutil.rmtree(tex_root, ignore_errors=True)
+
+
+def _render_latex_document(entries: Sequence[dict]) -> str:
+    lines = [
+        r"\documentclass[a4paper]{article}",
+        r"\usepackage[T1]{fontenc}",
+        r"\usepackage{graphicx}",
+        r"\usepackage{geometry}",
+        r"\geometry{margin=1.5cm}",
+        r"\setlength{\parindent}{0pt}",
+        r"\begin{document}",
+    ]
+    for idx, entry in enumerate(entries):
+        if idx > 0:
+            lines.append(r"\newpage")
+        lines.append(r"\section*{%s}" % _latex_escape(entry["case_name"]))
+        if entry.get("nel"):
+            lines.append(r"\textbf{NEL=%s}\\[0.5em]" % _latex_escape(entry["nel"]))
+        table_lines = _latex_monitor_table(
+            _parse_monitor_values(entry.get("summary_count")),
+            _parse_monitor_values(entry.get("summary_volume")),
+        )
+        if table_lines:
+            lines.append(r"\begin{center}")
+            lines.append(LATEX_MONITOR_CAPTION + r"\\[0.5em]")
+            lines.extend(table_lines)
+            lines.append(r"\vspace{0.5em}")
+            lines.append(r"\end{center}")
+        images = entry.get("images", [])
+        if images:
+            max_images = max(1, len(images))
+            height_fraction = min(IMAGE_HEIGHT_SHARE / max_images, IMAGE_HEIGHT_SHARE)
+            height_spec = f"{height_fraction:.3f}\\textheight"
+            lines.append(r"\begin{center}")
+            for image_idx, image_name in enumerate(images):
+                lines.append(
+                    r"\includegraphics[width=\linewidth,height=%s,keepaspectratio]{%s}"
+                    % (height_spec, image_name)
+                )
+                if image_idx != len(images) - 1:
+                    lines.append(r"\\[1em]")
+            lines.append(r"\end{center}")
+        lines.append(r"\bigskip")
+    lines.append(r"\end{document}")
+    return "\n".join(lines)
 
 
 def main() -> int:
@@ -292,39 +375,56 @@ def main() -> int:
         print("No cases with both view.pvsm and Filtered.vtu were found.")
         return 0
 
-    commands = [
-        ["bash", "-lc", _build_batch_command(args.module, args.pvbatch, render_script, case)]
-        for case in cases
-    ]
+    if args.skip_render:
+        commands: List[Optional[List[str]]] = [None] * len(cases)
+    else:
+        commands = [
+            ["bash", "-lc", _build_batch_command(args.module, args.pvbatch, render_script, case)]
+            for case in cases
+        ]
 
     failures = 0
-    successful_cases: List[Tuple[Path, Path, Optional[Path], Optional[str], Optional[str]]] = []
+    successful_cases: List[CaseRecord] = []
     for idx, (case, cmd) in enumerate(zip(cases, commands), start=1):
-        print(f"[{idx}/{len(cases)}] Rendering {case} ...")
-        result = subprocess.run(cmd, cwd=str(case), check=False)
         filtered_image = case / OUTPUT_FILE
         surface_image = case / SURFACE_OUTPUT_FILE
-        if result.returncode != 0:
+        if cmd is None:
+            print(f"[{idx}/{len(cases)}] Using existing outputs in {case} ...")
+        else:
+            print(f"[{idx}/{len(cases)}] Rendering {case} ...")
+            result = subprocess.run(cmd, cwd=str(case), check=False)
+            if result.returncode != 0:
+                failures += 1
+                print(f"  Failed to render {case} (exit code {result.returncode}).", file=sys.stderr)
+                continue
+        if not filtered_image.is_file():
+            print(f"  Missing {OUTPUT_FILE} in {case}.", file=sys.stderr)
             failures += 1
-            print(f"  Failed to render {case} (exit code {result.returncode}).", file=sys.stderr)
             continue
-        if _trim_image(filtered_image):
+        if not args.skip_render and _trim_image(filtered_image):
             print(f"  Trimmed whitespace from {OUTPUT_FILE}.")
-        surface_available = surface_image if _trim_image(surface_image) else None
-        if surface_available:
-            print(f"  Trimmed whitespace from {SURFACE_OUTPUT_FILE}.")
-        summary_line = _load_monitor_summary(case)
+        if surface_image.is_file():
+            if not args.skip_render:
+                trimmed = _trim_image(surface_image)
+            else:
+                trimmed = True
+            surface_available = surface_image if trimmed else None
+            if surface_available and not args.skip_render:
+                print(f"  Trimmed whitespace from {SURFACE_OUTPUT_FILE}.")
+        else:
+            surface_available = None
+        summary_count, summary_volume = _load_monitor_summary(case)
         nel_value = _extract_nel(case)
-        successful_cases.append((case, filtered_image, surface_available, summary_line, nel_value))
+        successful_cases.append(
+            (case, filtered_image, surface_available, summary_count, summary_volume, nel_value)
+        )
 
     if failures:
         print(f"Completed with {failures} failure(s).", file=sys.stderr)
-        return 1
-
     single_case_root = (cases_root / STATE_FILE).is_file()
     if not single_case_root and successful_cases:
         output_pdf = cases_root / "cases.pdf"
-        if _build_cases_pdf(successful_cases, output_pdf, args.legacy_layout):
+        if _build_cases_pdf(successful_cases, output_pdf, args.keep_temp):
             print(f"Created {output_pdf}.")
         else:
             print("Failed to create combined PDF.", file=sys.stderr)
