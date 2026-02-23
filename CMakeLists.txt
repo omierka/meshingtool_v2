@@ -29,9 +29,8 @@ add_subdirectory(MeshRef)
 # Install just meshhexer-cli
 install(TARGETS meshhexer-cli DESTINATION bin)
 
-# Install runner
-install(PROGRAMS runner.sh DESTINATION bin RENAME newgenmeshingtool)
-install(PROGRAMS run_all_cases.sh DESTINATION bin)
+# Install unified Python driver (replaces runner.sh + run_all_cases.sh)
+install(PROGRAMS preprocessor.py DESTINATION bin)
 install(FILES preprocessor.cfg DESTINATION bin)
 install(PROGRAMS
   PostProc/render_all_snapshots.py

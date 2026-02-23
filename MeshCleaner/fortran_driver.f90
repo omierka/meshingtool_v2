@@ -1,6 +1,6 @@
 program fortran_cgal_demo
     use iso_c_binding, only: c_ptr, c_null_char, c_associated, c_size_t, c_double, c_int, c_char
-    use iso_fortran_env, only: output_unit
+    use iso_fortran_env, only: output_unit, int64
     use mpi
     use bc_treatment, only: recompute_knpr_from_connectivity, HollowCylinderBoundaryClassification, &
         classify_hollowcylinder_boundaries, BoxBoundaryClassification, classify_box_boundaries, FaceList
@@ -136,6 +136,7 @@ program fortran_cgal_demo
     integer(c_int), allocatable :: filtered_kvert(:, :)
     integer(c_int), allocatable :: filtered_knpr(:)
     integer(c_int), allocatable :: filtered_monitor(:)
+    integer(c_int), allocatable :: filtered_kadj(:, :)
     real(c_double), allocatable :: filtered_volumes(:)
     integer :: filtered_nel, filtered_nvt
     logical :: element_selected, vertex_inside, all_vertices_inside
@@ -396,6 +397,12 @@ program fortran_cgal_demo
             call compute_monitor_volume_histogram(filtered_monitor, filtered_volumes, monitor_volume_hist)
             if (allocated(filtered_volumes)) deallocate(filtered_volumes)
         end if
+        if (allocated(filtered_kadj)) deallocate(filtered_kadj)
+        allocate(filtered_kadj(6, filtered_nel))
+        filtered_kadj = 0_c_int
+        ! Build face-to-face adjacency before boundary reclassification for consistency checks.
+        call build_hex_adjacency(filtered_kvert, filtered_kadj)
+        call validate_hex_connectivity(filtered_kadj)
         call recompute_knpr_from_connectivity(filtered_kvert, filtered_knpr, boundary_faces)
         if (mesh_config%loaded) then
             select case (trim(mesh_config%mesh_type))
@@ -1569,5 +1576,180 @@ contains
             buffer(base_idx + 3) = hex_coords(3, vertex_id)
         end do
     end subroutine gather_element_vertices
+
+    subroutine build_hex_adjacency(kvert, kadj)
+        integer(c_int), intent(in) :: kvert(:, :)
+        integer(c_int), intent(inout) :: kadj(:, :)
+
+        integer, parameter :: faces_per_hex = 6
+        integer, parameter :: face_pattern(4, faces_per_hex) = reshape([ &
+            1, 2, 3, 4, &
+            1, 2, 6, 5, &
+            2, 3, 7, 6, &
+            3, 4, 8, 7, &
+            4, 1, 5, 8, &
+            5, 6, 7, 8], [4, faces_per_hex])
+        integer :: nel, nfaces, elem_idx, face_idx, entry_count
+        integer :: bucket_idx, bucket_entry, owner_elem, owner_face
+        integer :: hash_size, conflict_count
+        integer(c_int) :: local_vertices(4), sorted_vertices(4)
+        integer, allocatable :: hash_head(:), hash_next(:)
+        integer, allocatable :: face_owner(:), face_local(:)
+        integer(c_int), allocatable :: stored_vertices(:, :)
+        logical :: match_found
+
+        nel = size(kvert, 2)
+        if (nel <= 0) return
+
+        nfaces = faces_per_hex * nel
+        if (nfaces <= 0) return
+
+        hash_size = max(1, 2 * nfaces + 1)
+        allocate(hash_head(hash_size))
+        allocate(hash_next(nfaces))
+        allocate(face_owner(nfaces))
+        allocate(face_local(nfaces))
+        allocate(stored_vertices(4, nfaces))
+        hash_head = 0
+        hash_next = 0
+        face_owner = 0
+        face_local = 0
+        stored_vertices = 0_c_int
+        entry_count = 0
+        conflict_count = 0
+
+        do elem_idx = 1, nel
+            do face_idx = 1, faces_per_hex
+                local_vertices = kvert(face_pattern(:, face_idx), elem_idx)
+                sorted_vertices = local_vertices
+                call sort_face_vertices(sorted_vertices)
+                bucket_idx = face_hash(sorted_vertices, hash_size)
+                bucket_entry = hash_head(bucket_idx)
+                match_found = .false.
+                do while (bucket_entry /= 0)
+                    if (all(stored_vertices(:, bucket_entry) == sorted_vertices)) then
+                        owner_elem = face_owner(bucket_entry)
+                        owner_face = face_local(bucket_entry)
+                        match_found = .true.
+                        if (kadj(owner_face, owner_elem) /= 0_c_int .and. &
+                            int(kadj(owner_face, owner_elem)) /= elem_idx) then
+                            conflict_count = conflict_count + 1
+                        else
+                            kadj(face_idx, elem_idx) = int(owner_elem, kind=c_int)
+                            kadj(owner_face, owner_elem) = int(elem_idx, kind=c_int)
+                        end if
+                        exit
+                    end if
+                    bucket_entry = hash_next(bucket_entry)
+                end do
+                if (.not. match_found) then
+                    entry_count = entry_count + 1
+                    if (entry_count > nfaces) then
+                        error stop "Adjacency accumulator overflow."
+                    end if
+                    stored_vertices(:, entry_count) = sorted_vertices
+                    face_owner(entry_count) = elem_idx
+                    face_local(entry_count) = face_idx
+                    hash_next(entry_count) = hash_head(bucket_idx)
+                    hash_head(bucket_idx) = entry_count
+                end if
+            end do
+        end do
+
+        if (conflict_count > 0 .and. is_master) then
+            write (*,'(A,I0)') '[ADJ_WARN] faces shared by more than 2 elements: ', conflict_count
+        end if
+
+        deallocate(hash_head, hash_next, face_owner, face_local, stored_vertices)
+    end subroutine build_hex_adjacency
+
+    subroutine validate_hex_connectivity(kadj)
+        integer(c_int), intent(in) :: kadj(:, :)
+
+        integer :: nel, faces_per_hex
+        logical, allocatable :: visited(:)
+        integer, allocatable :: queue(:)
+        integer, allocatable :: component_sizes(:)
+        integer :: elem_idx, face_idx, neighbor_elem
+        integer :: head, tail, current_elem
+        integer :: component_count, comp_idx
+
+        nel = size(kadj, 2)
+        faces_per_hex = size(kadj, 1)
+        if (nel <= 0) return
+
+        allocate(visited(nel))
+        allocate(queue(nel))
+        allocate(component_sizes(nel))
+        visited = .false.
+        component_sizes = 0
+        component_count = 0
+
+        do elem_idx = 1, nel
+            if (.not. visited(elem_idx)) then
+                component_count = component_count + 1
+                head = 1
+                tail = 1
+                queue(tail) = elem_idx
+                visited(elem_idx) = .true.
+                do while (head <= tail)
+                    current_elem = queue(head)
+                    head = head + 1
+                    component_sizes(component_count) = component_sizes(component_count) + 1
+                    do face_idx = 1, faces_per_hex
+                        neighbor_elem = int(kadj(face_idx, current_elem))
+                        if (neighbor_elem > 0 .and. neighbor_elem <= nel) then
+                            if (.not. visited(neighbor_elem)) then
+                                tail = tail + 1
+                                queue(tail) = neighbor_elem
+                                visited(neighbor_elem) = .true.
+                            end if
+                        end if
+                    end do
+                end do
+            end if
+        end do
+
+        if (is_master) then
+            write (*,'(A)') '[CONNECTIVITY] Checking face-adjacent regions...'
+            write (*,'(A,I0,A)') '[CONNECTIVITY] Identified ', component_count, ' independent subregions.'
+            do comp_idx = 1, component_count
+                write (*,'(A,I0,A,I0)') '[CONNECTIVITY] Subregion ', comp_idx, ': ', component_sizes(comp_idx), &
+                    ' elements'
+            end do
+        end if
+
+        deallocate(visited, queue, component_sizes)
+    end subroutine validate_hex_connectivity
+
+    subroutine sort_face_vertices(vertices)
+        integer(c_int), intent(inout) :: vertices(4)
+        integer(c_int) :: key
+        integer :: i, j
+
+        do i = 2, 4
+            key = vertices(i)
+            j = i - 1
+            do while (j >= 1 .and. vertices(j) > key)
+                vertices(j + 1) = vertices(j)
+                j = j - 1
+            end do
+            vertices(j + 1) = key
+        end do
+    end subroutine sort_face_vertices
+
+    integer function face_hash(vertices, hash_size) result(bucket_idx)
+        integer(c_int), intent(in) :: vertices(4)
+        integer, intent(in) :: hash_size
+        integer(int64) :: hash
+        integer :: i
+
+        hash = 1469598103934665603_int64
+        do i = 1, 4
+            hash = ieor(hash, int(vertices(i), int64))
+            hash = hash * 1099511628211_int64
+        end do
+        bucket_idx = int(mod(abs(hash), int(hash_size, int64))) + 1
+    end function face_hash
 
 end program fortran_cgal_demo
