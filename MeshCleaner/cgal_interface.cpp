@@ -19,6 +19,7 @@
 #include <vector>
 #include <utility>
 #include <limits>
+#include <cmath>
 
 namespace PMP = CGAL::Polygon_mesh_processing;
 
@@ -287,6 +288,37 @@ int cgal_triangle_intersects_mesh(const MeshHandle* handle, const double* triang
     const Kernel::Triangle_3 triangle(p0, p1, p2);
 
     *intersects_out = tree->do_intersect(triangle) ? 1 : 0;
+    return 0;
+}
+
+int cgal_build_aabb_tree(MeshHandle* handle) {
+    if (handle == nullptr) {
+        return 1;
+    }
+    AABBTree* tree = ensure_tree(handle);
+    if (tree == nullptr) {
+        return 2;
+    }
+    return 0;
+}
+
+int cgal_signed_distance_to_mesh(const MeshHandle* handle, const double* point, double* distance_out) {
+    if (handle == nullptr || point == nullptr || distance_out == nullptr) {
+        return 1;
+    }
+
+    AABBTree* tree = ensure_tree(handle);
+    SideTester* tester = ensure_side_tester(handle);
+    if (tree == nullptr || tester == nullptr) {
+        return 2;
+    }
+
+    const Kernel::Point_3 query(point[0], point[1], point[2]);
+    const double sq_dist = CGAL::to_double(tree->squared_distance(query));
+    const double dist = std::sqrt(std::max(0.0, sq_dist));
+    const auto side = (*tester)(query);
+    const bool is_inside = (side == CGAL::ON_BOUNDED_SIDE || side == CGAL::ON_BOUNDARY);
+    *distance_out = is_inside ? dist : -dist;
     return 0;
 }
 

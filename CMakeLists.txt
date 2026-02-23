@@ -25,6 +25,7 @@ add_subdirectory(AxiMesher)
 add_subdirectory(MeshCleaner)
 add_subdirectory(MonitorGeneratorForMesher)
 add_subdirectory(MeshRef)
+add_subdirectory(MeshDeform)
 
 # Install just meshhexer-cli
 install(TARGETS meshhexer-cli DESTINATION bin)
