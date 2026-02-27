@@ -1,8 +1,9 @@
 module def_mod
   use iso_fortran_env, only: real64
   use iso_c_binding, only: c_ptr, c_null_ptr, c_char, c_null_char, c_size_t, c_double, c_int, c_associated
+  use mpi
   use setupe3dfile_reader, only: MeshConfig
-  use preprocessor_config_mod, only: get_tolerance_floor
+  use preprocessor_config_mod, only: get_tolerance_floor, get_meshdeform_characteristic_scale
   implicit none
   private
 
@@ -89,13 +90,17 @@ module def_mod
   public :: report_constraint_combinations
   public :: identify_boundary_nodes
   public :: build_edge_to_element
+  public :: broadcast_mesh
+  public :: broadcast_mesh_coordinates
   public :: report_boundary_assignment_status
   public :: load_surface_mesh
   public :: report_surface_summary
   public :: apply_edge_deformation
   public :: compute_signed_distances
+  public :: compute_signed_distances_parallel
   public :: report_distance_summary
   public :: write_deformed_vtu
+  public :: write_deformed_tri
 
   interface
      function cgal_load_off(path) bind(C, name="cgal_load_off") result(handle)
@@ -541,6 +546,59 @@ contains
     end do
   end subroutine compute_signed_distances
 
+  subroutine compute_signed_distances_parallel(mesh, surface, distances, mpi_rank, mpi_size)
+    type(hex_mesh_type), intent(in) :: mesh
+    type(surface_mesh), intent(in) :: surface
+    real(rk), allocatable, intent(out) :: distances(:)
+    integer, intent(in) :: mpi_rank, mpi_size
+
+    integer :: nvt, start_idx, end_idx, local_count, idx, ivt
+    real(rk), allocatable :: local_dist(:)
+    integer, allocatable :: counts(:), displs(:)
+    real(c_double) :: point(3), signed_distance
+    integer :: mpi_err
+    integer(c_int) :: status
+
+    nvt = mesh%nvt
+    if (nvt <= 0) then
+       allocate(distances(0))
+       return
+    end if
+
+    start_idx = (mpi_rank * nvt) / mpi_size + 1
+    end_idx   = ((mpi_rank + 1) * nvt) / mpi_size
+    local_count = max(0, end_idx - start_idx + 1)
+    if (local_count > 0) then
+       allocate(local_dist(local_count))
+       do idx = 1, local_count
+          ivt = start_idx + idx - 1
+          point(1) = real(mesh%dcorvg(1, ivt), c_double)
+          point(2) = real(mesh%dcorvg(2, ivt), c_double)
+          point(3) = real(mesh%dcorvg(3, ivt), c_double)
+          status = cgal_signed_distance_to_mesh(surface%handle, point, signed_distance)
+          if (status /= 0) signed_distance = 0.0_c_double
+          local_dist(idx) = real(signed_distance, rk)
+       end do
+    else
+       allocate(local_dist(0))
+    end if
+
+    allocate(counts(mpi_size))
+    allocate(displs(mpi_size))
+    do idx = 0, mpi_size - 1
+       counts(idx + 1) = ((idx + 1) * nvt) / mpi_size - (idx * nvt) / mpi_size
+       displs(idx + 1) = ((idx * nvt) / mpi_size)
+    end do
+
+    allocate(distances(nvt))
+    call MPI_Allgatherv(local_dist, local_count, MPI_DOUBLE_PRECISION, distances, counts, displs, &
+         MPI_DOUBLE_PRECISION, MPI_COMM_WORLD, mpi_err)
+
+    if (allocated(local_dist)) deallocate(local_dist)
+    if (allocated(counts)) deallocate(counts)
+    if (allocated(displs)) deallocate(displs)
+  end subroutine compute_signed_distances_parallel
+
   subroutine report_distance_summary(surface, mesh)
     type(surface_mesh), intent(in) :: surface
     type(hex_mesh_type), intent(in) :: mesh
@@ -560,32 +618,43 @@ contains
     if (allocated(distances)) deallocate(distances)
   end subroutine report_distance_summary
 
-  subroutine apply_edge_deformation(mesh, config, surface, nsteps)
+  subroutine apply_edge_deformation(mesh, config, constraint_flags, distances)
     type(hex_mesh_type), intent(inout) :: mesh
     type(MeshConfig), intent(in) :: config
-    type(surface_mesh), intent(in) :: surface
-    integer, intent(in) :: nsteps
+    integer, intent(in) :: constraint_flags(:)
+    real(rk), intent(in) :: distances(:)
 
     integer, parameter :: edge_vertices(2, 12) = reshape([ &
          1, 2, 2, 3, 3, 4, 4, 1, 1, 5, 2, 6, 3, 7, 4, 8, 5, 6, 6, 7, 7, 8, 8, 5], [2, 12])
-    integer :: step_idx, elem_idx, edge_idx, ivt1, ivt2
+    integer :: elem_idx, edge_idx, ivt1, ivt2
     integer :: nel, nvt
     real(rk) :: characteristic_size, scale_factor, weight_edge
     real(rk), allocatable :: volumes(:), vertex_measure(:), weights(:)
-    real(rk), allocatable :: accum_x(:), accum_y(:), accum_z(:), accum_w(:), vertex_weights(:), distances(:)
+    real(rk), allocatable :: accum_x(:), accum_y(:), accum_z(:), accum_w(:), vertex_weights(:)
     real(rk) :: p1(3), p2(3), daux1, daux2, px, py, pz
     real(rk), parameter :: damping = 0.2_rk
+    real(rk) :: box_start(3), box_finish(3)
+    real(rk) :: cyl_center(2), inner_radius, outer_radius
+    real(rk) :: axial_min, axial_max
+    logical :: has_inner, has_outer, has_axial_min, has_axial_max
 
     nvt = mesh%nvt
     nel = mesh%nel
     if (nvt <= 0 .or. nel <= 0) return
+    if (size(distances) /= nvt) then
+       write(*, '(A)') 'Distance array size mismatch; deformation skipped.'
+       return
+    end if
     if (.not.allocated(mesh%kvert)) return
     if (.not.allocated(mesh%dcorvg)) return
     if (.not.allocated(mesh%kedge)) call build_edge_to_element(mesh)
 
+    call compute_box_limits(mesh, config, box_start, box_finish)
+    call compute_cylinder_parameters(mesh, config, cyl_center, inner_radius, outer_radius, axial_min, axial_max, &
+         has_inner, has_outer, has_axial_min, has_axial_max)
     call compute_characteristic_size(mesh, config, characteristic_size)
     if (characteristic_size <= 0.0_rk) characteristic_size = 1.0_rk
-    scale_factor = 100.0_rk / characteristic_size
+    scale_factor = real(get_meshdeform_characteristic_scale(), rk) / characteristic_size
 
     allocate(volumes(nel))
     allocate(vertex_measure(nvt))
@@ -595,74 +664,72 @@ contains
     allocate(accum_z(nvt))
     allocate(accum_w(nvt))
     allocate(vertex_weights(nvt))
-    allocate(distances(nvt))
 
-    do step_idx = 1, max(1, nsteps)
-       call compute_signed_distances(surface, mesh, distances)
-       call compute_vertex_weights(distances, scale_factor, vertex_weights)
-       call compute_hexahedron_volumes(mesh, volumes)
+    call compute_vertex_weights(distances, scale_factor, vertex_weights)
+    call compute_hexahedron_volumes(mesh, volumes)
 
-       vertex_measure = 0.0_rk
-       weights = 0.0_rk
-       do elem_idx = 1, nel
-          do edge_idx = 1, 8
-             ivt1 = mesh%kvert(edge_idx, elem_idx)
-             if (ivt1 < 1 .or. ivt1 > nvt) cycle
-             vertex_measure(ivt1) = vertex_measure(ivt1) + abs(volumes(elem_idx))
-             weights(ivt1) = weights(ivt1) + 1.0_rk
-          end do
+    vertex_measure = 0.0_rk
+    weights = 0.0_rk
+    do elem_idx = 1, nel
+       do edge_idx = 1, 8
+          ivt1 = mesh%kvert(edge_idx, elem_idx)
+          if (ivt1 < 1 .or. ivt1 > nvt) cycle
+          vertex_measure(ivt1) = vertex_measure(ivt1) + abs(volumes(elem_idx))
+          weights(ivt1) = weights(ivt1) + 1.0_rk
        end do
-       do ivt1 = 1, nvt
-          if (weights(ivt1) > 0.0_rk) vertex_measure(ivt1) = vertex_measure(ivt1) / weights(ivt1)
-       end do
+    end do
+    do ivt1 = 1, nvt
+       if (weights(ivt1) > 0.0_rk) vertex_measure(ivt1) = vertex_measure(ivt1) / weights(ivt1)
+    end do
 
-       call compute_vertex_weights(distances, scale_factor, vertex_weights)
-       do ivt1 = 1, nvt
-          vertex_measure(ivt1) = vertex_measure(ivt1) * vertex_weights(ivt1)
-       end do
+    do ivt1 = 1, nvt
+       vertex_measure(ivt1) = vertex_measure(ivt1) * vertex_weights(ivt1)
+    end do
 
-       accum_x = 0.0_rk
-       accum_y = 0.0_rk
-       accum_z = 0.0_rk
-       accum_w = 0.0_rk
+    accum_x = 0.0_rk
+    accum_y = 0.0_rk
+    accum_z = 0.0_rk
+    accum_w = 0.0_rk
 
-       do elem_idx = 1, nel
-          do edge_idx = 1, 12
-             ivt1 = mesh%kvert(edge_vertices(1, edge_idx), elem_idx)
-             ivt2 = mesh%kvert(edge_vertices(2, edge_idx), elem_idx)
-             if (ivt1 < 1 .or. ivt1 > nvt) cycle
-             if (ivt2 < 1 .or. ivt2 > nvt) cycle
-             p1 = mesh%dcorvg(:, ivt1)
-             p2 = mesh%dcorvg(:, ivt2)
-             daux1 = abs(vertex_measure(ivt1))
-             daux2 = abs(vertex_measure(ivt2))
-             weight_edge = 1.0_rk
+    do elem_idx = 1, nel
+       do edge_idx = 1, 12
+          ivt1 = mesh%kvert(edge_vertices(1, edge_idx), elem_idx)
+          ivt2 = mesh%kvert(edge_vertices(2, edge_idx), elem_idx)
+          if (ivt1 < 1 .or. ivt1 > nvt) cycle
+          if (ivt2 < 1 .or. ivt2 > nvt) cycle
+          p1 = mesh%dcorvg(:, ivt1)
+          p2 = mesh%dcorvg(:, ivt2)
+          daux1 = abs(vertex_measure(ivt1))
+          daux2 = abs(vertex_measure(ivt2))
+          weight_edge = 1.0_rk
 
-             accum_x(ivt1) = accum_x(ivt1) + weight_edge * p2(1) * daux2
-             accum_y(ivt1) = accum_y(ivt1) + weight_edge * p2(2) * daux2
-             accum_z(ivt1) = accum_z(ivt1) + weight_edge * p2(3) * daux2
-             accum_w(ivt1) = accum_w(ivt1) + weight_edge * daux2
+          accum_x(ivt1) = accum_x(ivt1) + weight_edge * p2(1) * daux2
+          accum_y(ivt1) = accum_y(ivt1) + weight_edge * p2(2) * daux2
+          accum_z(ivt1) = accum_z(ivt1) + weight_edge * p2(3) * daux2
+          accum_w(ivt1) = accum_w(ivt1) + weight_edge * daux2
 
-             accum_x(ivt2) = accum_x(ivt2) + weight_edge * p1(1) * daux1
-             accum_y(ivt2) = accum_y(ivt2) + weight_edge * p1(2) * daux1
-             accum_z(ivt2) = accum_z(ivt2) + weight_edge * p1(3) * daux1
-             accum_w(ivt2) = accum_w(ivt2) + weight_edge * daux1
-          end do
-       end do
-
-       do ivt1 = 1, nvt
-          if (accum_w(ivt1) > 0.0_rk) then
-             px = accum_x(ivt1) / accum_w(ivt1)
-             py = accum_y(ivt1) / accum_w(ivt1)
-             pz = accum_z(ivt1) / accum_w(ivt1)
-             mesh%dcorvg(1, ivt1) = max(0.0_rk, 1.0_rk - damping) * mesh%dcorvg(1, ivt1) + damping * px
-             mesh%dcorvg(2, ivt1) = max(0.0_rk, 1.0_rk - damping) * mesh%dcorvg(2, ivt1) + damping * py
-             mesh%dcorvg(3, ivt1) = max(0.0_rk, 1.0_rk - damping) * mesh%dcorvg(3, ivt1) + damping * pz
-          end if
+          accum_x(ivt2) = accum_x(ivt2) + weight_edge * p1(1) * daux1
+          accum_y(ivt2) = accum_y(ivt2) + weight_edge * p1(2) * daux1
+          accum_z(ivt2) = accum_z(ivt2) + weight_edge * p1(3) * daux1
+          accum_w(ivt2) = accum_w(ivt2) + weight_edge * daux1
        end do
     end do
 
-    deallocate(volumes, vertex_measure, weights, accum_x, accum_y, accum_z, accum_w, vertex_weights, distances)
+    do ivt1 = 1, nvt
+       if (accum_w(ivt1) > 0.0_rk) then
+          px = accum_x(ivt1) / accum_w(ivt1)
+          py = accum_y(ivt1) / accum_w(ivt1)
+          pz = accum_z(ivt1) / accum_w(ivt1)
+          call enforce_parametrization_constraints(constraint_flags, ivt1, mesh%dcorvg(:, ivt1), px, py, pz, &
+               box_start, box_finish, cyl_center, inner_radius, outer_radius, axial_min, axial_max, has_inner, &
+               has_outer, has_axial_min, has_axial_max)
+          mesh%dcorvg(1, ivt1) = max(0.0_rk, 1.0_rk - damping) * mesh%dcorvg(1, ivt1) + damping * px
+          mesh%dcorvg(2, ivt1) = max(0.0_rk, 1.0_rk - damping) * mesh%dcorvg(2, ivt1) + damping * py
+          mesh%dcorvg(3, ivt1) = max(0.0_rk, 1.0_rk - damping) * mesh%dcorvg(3, ivt1) + damping * pz
+       end if
+    end do
+
+    deallocate(volumes, vertex_measure, weights, accum_x, accum_y, accum_z, accum_w, vertex_weights)
   end subroutine apply_edge_deformation
 
   subroutine write_deformed_vtu(mesh, surface, filename)
@@ -675,6 +742,49 @@ contains
     call write_mesh_vtu(mesh, distances, filename)
     if (allocated(distances)) deallocate(distances)
   end subroutine write_deformed_vtu
+
+  subroutine write_deformed_tri(mesh, filename)
+    type(hex_mesh_type), intent(in) :: mesh
+    character(len=*), intent(in) :: filename
+    integer :: unit, nel, nvt, nbct, nve, nee, nae, i
+
+    if (.not.allocated(mesh%dcorvg) .or. .not.allocated(mesh%kvert)) then
+       write(*, '(A)') 'Mesh data unavailable; TRI file not written.'
+       return
+    end if
+
+    nel = mesh%nel
+    nvt = mesh%nvt
+    nbct = mesh%nbct
+    nve = mesh%nve
+    nee = mesh%nee
+    nae = mesh%nae
+
+    open(newunit=unit, file=trim(filename), status='replace', action='write')
+    write(unit, '(A)') 'MeshDeform output'
+    write(unit, '(A)') 'Generated by meshdeform'
+    write(unit, '(I8,1X,I8,1X,I8,1X,I8,1X,I8,1X,I8,3X,A)') nel, nvt, nbct, nve, nee, nae, 'NEL,NVT,NBCT,NVE,NEE,NAE'
+    write(unit, '(A)') 'DCORVG'
+    do i = 1, nvt
+       write(unit, '(3(1X,ES24.16))') mesh%dcorvg(1, i), mesh%dcorvg(2, i), mesh%dcorvg(3, i)
+    end do
+    write(unit, '(A)') 'KVERT'
+    do i = 1, nel
+       write(unit, '(*(1X,I10))') mesh%kvert(:, i)
+    end do
+    write(unit, '(A)') 'KNPR'
+    if (allocated(mesh%knpr)) then
+       do i = 1, nvt
+          write(unit, '(I8)') mesh%knpr(i)
+       end do
+    else
+       do i = 1, nvt
+          write(unit, '(I8)') 0
+       end do
+    end if
+    close(unit)
+    write(*, '(A,A)') 'TRI mesh written to ', trim(filename)
+  end subroutine write_deformed_tri
 
   subroutine write_mesh_vtu(mesh, distances, filename)
     type(hex_mesh_type), intent(in) :: mesh
@@ -811,6 +921,195 @@ contains
     response = max(temp, 0.8_rk)
   end subroutine kernel_function
 
+  subroutine compute_box_limits(mesh, config, start, finish)
+    type(hex_mesh_type), intent(in) :: mesh
+    type(MeshConfig), intent(in) :: config
+    real(rk), intent(out) :: start(3)
+    real(rk), intent(out) :: finish(3)
+
+    call compute_mesh_bounds(mesh, start, finish)
+    if (config%box%has_geometry_start) start = real(config%box%geometry_start, rk)
+    if (config%box%has_geometry_length) finish = start + real(config%box%geometry_length, rk)
+  end subroutine compute_box_limits
+
+  subroutine compute_cylinder_parameters(mesh, config, center, inner_radius, outer_radius, axial_min, axial_max, &
+       has_inner, has_outer, has_axial_min, has_axial_max)
+    type(hex_mesh_type), intent(in) :: mesh
+    type(MeshConfig), intent(in) :: config
+    real(rk), intent(out) :: center(2)
+    real(rk), intent(out) :: inner_radius, outer_radius
+    real(rk), intent(out) :: axial_min, axial_max
+    logical, intent(out) :: has_inner, has_outer, has_axial_min, has_axial_max
+    real(rk) :: bounds_min(3), bounds_max(3)
+
+    call compute_mesh_bounds(mesh, bounds_min, bounds_max)
+    center(1) = 0.5_rk * (bounds_min(1) + bounds_max(1))
+    center(2) = 0.5_rk * (bounds_min(2) + bounds_max(2))
+
+    has_outer = config%cylinder%has_barrel_diameter
+    if (has_outer) then
+       outer_radius = 0.5_rk * real(config%cylinder%barrel_diameter, rk)
+    else
+       outer_radius = 0.0_rk
+    end if
+    has_inner = config%cylinder%has_inner_diameter
+    if (has_inner) then
+       inner_radius = 0.5_rk * real(config%cylinder%inner_diameter, rk)
+    else
+       inner_radius = 0.0_rk
+    end if
+    has_axial_min = config%cylinder%has_axial_start
+    if (has_axial_min) then
+       axial_min = real(config%cylinder%axial_start, rk)
+    else
+       axial_min = bounds_min(3)
+    end if
+    has_axial_max = has_axial_min .and. config%cylinder%has_barrel_length
+    if (has_axial_max) then
+       axial_max = real(config%cylinder%axial_start + config%cylinder%barrel_length, rk)
+    else
+       axial_max = bounds_max(3)
+    end if
+  end subroutine compute_cylinder_parameters
+
+  integer function count_constraints(mask)
+    integer, intent(in) :: mask
+    integer :: value, bits
+    value = mask
+    bits = 0
+    do while (value /= 0)
+       if (iand(value, 1) /= 0) bits = bits + 1
+       value = ishft(value, -1)
+    end do
+    count_constraints = bits
+  end function count_constraints
+
+  subroutine enforce_parametrization_constraints(constraint_flags, idx, current, px, py, pz, box_start, box_finish, &
+       cyl_center, inner_radius, outer_radius, axial_min, axial_max, has_inner, has_outer, has_axial_min, has_axial_max)
+    integer, intent(in) :: constraint_flags(:)
+    integer, intent(in) :: idx
+    real(rk), intent(in) :: current(3)
+    real(rk), intent(inout) :: px, py, pz
+    real(rk), intent(in) :: box_start(3), box_finish(3)
+    real(rk), intent(in) :: cyl_center(2), inner_radius, outer_radius
+    real(rk), intent(in) :: axial_min, axial_max
+    logical, intent(in) :: has_inner, has_outer, has_axial_min, has_axial_max
+    integer :: mask, combo_count
+    logical :: has_xmin, has_xmax, has_ymin, has_ymax, has_zmin, has_zmax, has_inner_flag, has_outer_flag
+
+    if (idx > size(constraint_flags)) return
+    mask = constraint_flags(idx)
+    combo_count = count_constraints(mask)
+    if (combo_count <= 0) return
+    if (combo_count >= 3) then
+       px = current(1)
+       py = current(2)
+       pz = current(3)
+       return
+    end if
+
+    has_xmin = iand(mask, constraint_x_min) /= 0
+    has_xmax = iand(mask, constraint_x_max) /= 0
+    has_ymin = iand(mask, constraint_y_min) /= 0
+    has_ymax = iand(mask, constraint_y_max) /= 0
+    has_zmin = iand(mask, constraint_z_min) /= 0
+    has_zmax = iand(mask, constraint_z_max) /= 0
+    has_inner_flag = iand(mask, constraint_cyl_inner) /= 0
+    has_outer_flag = iand(mask, constraint_cyl_outer) /= 0
+
+    select case (combo_count)
+    case (1)
+      call apply_single_constraint()
+    case (2)
+       if (apply_dual_constraint()) return
+       call apply_single_constraint()
+    end select
+  contains
+    subroutine apply_single_constraint()
+      if (has_xmin) px = box_start(1)
+      if (has_xmax) px = box_finish(1)
+      if (has_ymin) py = box_start(2)
+      if (has_ymax) py = box_finish(2)
+      call apply_z_plane()
+      if (has_inner_flag .and. has_inner) call project_to_radius(inner_radius)
+      if (has_outer_flag .and. has_outer) call project_to_radius(outer_radius)
+    end subroutine apply_single_constraint
+
+    logical function apply_dual_constraint()
+      apply_dual_constraint = .false.
+      if ((has_xmin .or. has_xmax) .and. (has_ymin .or. has_ymax)) then
+         if (has_xmin) px = box_start(1)
+         if (has_xmax) px = box_finish(1)
+         if (has_ymin) py = box_start(2)
+         if (has_ymax) py = box_finish(2)
+         apply_dual_constraint = .true.
+         return
+      end if
+      if ((has_xmin .or. has_xmax) .and. (has_zmin .or. has_zmax)) then
+         if (has_xmin) px = box_start(1)
+         if (has_xmax) px = box_finish(1)
+         call apply_z_plane()
+         apply_dual_constraint = .true.
+         return
+      end if
+      if ((has_ymin .or. has_ymax) .and. (has_zmin .or. has_zmax)) then
+         if (has_ymin) py = box_start(2)
+         if (has_ymax) py = box_finish(2)
+         call apply_z_plane()
+         apply_dual_constraint = .true.
+         return
+      end if
+      if ((has_zmin .or. has_zmax) .and. (has_inner_flag .or. has_outer_flag)) then
+         call apply_z_plane()
+         if (has_inner_flag .and. has_inner) call project_to_radius(inner_radius)
+         if (has_outer_flag .and. has_outer) call project_to_radius(outer_radius)
+         apply_dual_constraint = .true.
+         return
+      end if
+      if ((has_xmin .or. has_xmax .or. has_ymin .or. has_ymax) .and. (has_inner_flag .or. has_outer_flag)) then
+         ! Intersections other than axial planes are unsupported; fall back to freezing
+         px = current(1)
+         py = current(2)
+         pz = current(3)
+         apply_dual_constraint = .true.
+         return
+      end if
+    end function apply_dual_constraint
+
+    subroutine project_to_radius(target_radius)
+      real(rk), intent(in) :: target_radius
+      real(rk) :: dx, dy, rad, scale
+      dx = px - cyl_center(1)
+      dy = py - cyl_center(2)
+      rad = sqrt(dx * dx + dy * dy)
+      if (rad <= 0.0_rk) then
+         px = cyl_center(1) + target_radius
+         py = cyl_center(2)
+      else
+         scale = target_radius / rad
+         px = cyl_center(1) + dx * scale
+         py = cyl_center(2) + dy * scale
+      end if
+    end subroutine project_to_radius
+
+    subroutine apply_z_plane()
+      if (has_zmin) then
+         if (has_axial_min) then
+            pz = axial_min
+         else
+            pz = box_start(3)
+         end if
+      end if
+      if (has_zmax) then
+         if (has_axial_max) then
+            pz = axial_max
+         else
+            pz = box_finish(3)
+         end if
+      end if
+    end subroutine apply_z_plane
+  end subroutine enforce_parametrization_constraints
+
   subroutine compute_hexahedron_volumes(mesh, volumes)
     type(hex_mesh_type), intent(in) :: mesh
     real(rk), allocatable, intent(out) :: volumes(:)
@@ -896,6 +1195,48 @@ contains
 
     call trim_edge_storage(mesh)
   end subroutine build_edge_to_element
+
+  subroutine broadcast_mesh(mesh, mpi_rank, mpi_size)
+    type(hex_mesh_type), intent(inout) :: mesh
+    integer, intent(in) :: mpi_rank, mpi_size
+    integer :: header(6)
+    integer :: mpi_err
+
+    if (mpi_rank == 0) then
+       header = [mesh%nel, mesh%nvt, mesh%nbct, mesh%nve, mesh%nee, mesh%nae]
+    else
+       header = 0
+    end if
+    call MPI_Bcast(header, 6, MPI_INTEGER, 0, MPI_COMM_WORLD, mpi_err)
+    if (mpi_rank /= 0) then
+       mesh%nel = header(1)
+       mesh%nvt = header(2)
+       mesh%nbct = header(3)
+       mesh%nve = header(4)
+       mesh%nee = header(5)
+       mesh%nae = header(6)
+       if (.not.allocated(mesh%dcorvg)) allocate(mesh%dcorvg(3, mesh%nvt))
+       if (.not.allocated(mesh%kvert)) allocate(mesh%kvert(mesh%nve, mesh%nel))
+       if (.not.allocated(mesh%knpr)) allocate(mesh%knpr(mesh%nvt))
+    end if
+    if (mesh%nvt > 0) then
+       call MPI_Bcast(mesh%dcorvg, 3 * mesh%nvt, MPI_DOUBLE_PRECISION, 0, MPI_COMM_WORLD, mpi_err)
+       call MPI_Bcast(mesh%knpr, mesh%nvt, MPI_INTEGER, 0, MPI_COMM_WORLD, mpi_err)
+    end if
+    if (mesh%nel > 0) then
+       call MPI_Bcast(mesh%kvert, mesh%nve * mesh%nel, MPI_INTEGER, 0, MPI_COMM_WORLD, mpi_err)
+    end if
+  end subroutine broadcast_mesh
+
+  subroutine broadcast_mesh_coordinates(mesh, mpi_rank)
+    type(hex_mesh_type), intent(inout) :: mesh
+    integer, intent(in) :: mpi_rank
+    integer :: mpi_err
+
+    if (.not.allocated(mesh%dcorvg)) return
+    if (mesh%nvt <= 0) return
+    call MPI_Bcast(mesh%dcorvg, 3 * mesh%nvt, MPI_DOUBLE_PRECISION, 0, MPI_COMM_WORLD, mpi_err)
+  end subroutine broadcast_mesh_coordinates
 
   integer function find_edge_id(mesh, v1, v2) result(edge_id)
     type(hex_mesh_type), intent(inout) :: mesh

@@ -14,6 +14,8 @@ module preprocessor_config_mod
   real(real64) :: cfg_monitor_threshold_default = 1.5_real64
   real(real64) :: cfg_triangle_tree_tol = 1.0e-12_real64
   real(real64) :: cfg_clip_eps = 1.0e-12_real64
+  integer :: cfg_meshdeform_steps = 1
+  real(real64) :: cfg_meshdeform_char_scale = 100.0_real64
 
   public :: get_cylinder_boundary_tolerance_factor
   public :: get_box_boundary_tolerance_factor
@@ -22,6 +24,8 @@ module preprocessor_config_mod
   public :: get_monitor_threshold_default
   public :: get_triangle_tree_tolerance
   public :: get_monitor_clip_epsilon
+  public :: get_meshdeform_step_count
+  public :: get_meshdeform_characteristic_scale
 
 contains
 
@@ -108,6 +112,13 @@ contains
       case ("clip_eps")
         call assign_real(raw_value, cfg_clip_eps)
       end select
+    case ("3dmeshdeform")
+      select case (trim(key))
+      case ("deformation_steps")
+        call assign_int(raw_value, cfg_meshdeform_steps)
+      case ("characteristic_scale")
+        call assign_real(raw_value, cfg_meshdeform_char_scale)
+      end select
     end select
   end subroutine assign_value
 
@@ -122,6 +133,17 @@ contains
       target = parsed
     end if
   end subroutine assign_real
+
+  subroutine assign_int(raw_value, target)
+    character(len=*), intent(in) :: raw_value
+    integer, intent(inout) :: target
+    integer :: parsed, ios
+
+    read(raw_value, *, iostat=ios) parsed
+    if (ios == 0) then
+      target = parsed
+    end if
+  end subroutine assign_int
 
   subroutine parse_section_name(line, section)
     character(len=*), intent(in) :: line
@@ -185,5 +207,19 @@ contains
     call ensure_config_loaded()
     get_monitor_clip_epsilon = cfg_clip_eps
   end function get_monitor_clip_epsilon
+
+  integer function get_meshdeform_step_count()
+    call ensure_config_loaded()
+    get_meshdeform_step_count = max(1, cfg_meshdeform_steps)
+  end function get_meshdeform_step_count
+
+  real(real64) function get_meshdeform_characteristic_scale()
+    call ensure_config_loaded()
+    if (cfg_meshdeform_char_scale <= 0.0_real64) then
+      get_meshdeform_characteristic_scale = 100.0_real64
+    else
+      get_meshdeform_characteristic_scale = cfg_meshdeform_char_scale
+    end if
+  end function get_meshdeform_characteristic_scale
 
 end module preprocessor_config_mod

@@ -184,6 +184,7 @@ contains
         logical, allocatable :: face_is_axial_min(:), face_is_axial_max(:)
         integer, allocatable :: face_category(:)
         real(c_double), allocatable :: face_normals(:, :)
+        real(c_double), allocatable :: face_inflow_eps(:)
         logical, allocatable :: inflow_face_mask(:)
 
         classification%min_edge_length = compute_min_edge_length(coords, kvert)
@@ -222,6 +223,7 @@ contains
         allocate(face_is_axial_max(face_count))
         allocate(face_category(face_count))
         allocate(face_normals(3, face_count))
+        allocate(face_inflow_eps(face_count))
         allocate(inflow_face_mask(face_count))
         face_is_outer = .false.
         face_is_inner = .false.
@@ -234,6 +236,7 @@ contains
         do face_idx = 1, face_count
             call gather_face_vertices(boundary_faces%elements(face_idx), boundary_faces%face_ids(face_idx), kvert, node_ids)
             face_normals(:, face_idx) = compute_face_normal(coords, node_ids)
+            face_inflow_eps(face_idx) = compute_face_inflow_epsilon(coords, node_ids)
             if (have_outer) then
                 face_is_outer(face_idx) = check_all_vertices_on_radius(coords, node_ids, outer_radius, &
                     classification%tolerance)
@@ -270,8 +273,8 @@ contains
         end do
 
         call assign_cylinder_inflows(process, coords, kvert, boundary_faces, face_category, face_normals, &
-            face_is_outer, face_is_inner, face_is_axial_min, face_is_axial_max, inflow_face_mask, classification, &
-            classification%tolerance)
+            face_inflow_eps, face_is_outer, face_is_inner, face_is_axial_min, face_is_axial_max, inflow_face_mask, &
+            classification)
 
         if (have_outer) then
             call subset_face_list(boundary_faces, face_is_outer, classification%cyl_outer_faces)
@@ -295,7 +298,7 @@ contains
         call collect_nodes_from_face_list(classification%all_boundary_faces, coords, kvert, classification%inner_wall_nodes)
 
         deallocate(face_is_outer, face_is_inner, face_is_axial_min, face_is_axial_max, face_category, face_normals, &
-            inflow_face_mask)
+            face_inflow_eps, inflow_face_mask)
     end subroutine classify_hollowcylinder_boundaries
 
     subroutine classify_box_boundaries(config, process, coords, kvert, knpr, boundary_faces, classification)
@@ -318,6 +321,7 @@ contains
         integer, allocatable :: face_planes(:)
         logical, allocatable :: inflow_face_mask(:)
         real(c_double), allocatable :: face_normals(:, :)
+        real(c_double), allocatable :: face_inflow_eps(:)
 
         classification%min_edge_length = compute_min_edge_length(coords, kvert)
         tolerance_factor = real(get_box_boundary_tolerance_factor(), kind=c_double)
@@ -358,6 +362,7 @@ contains
         allocate(face_planes(face_count))
         allocate(inflow_face_mask(face_count))
         allocate(face_normals(3, face_count))
+        allocate(face_inflow_eps(face_count))
         face_flags = .false.
         face_planes = 0
         inflow_face_mask = .false.
@@ -366,6 +371,7 @@ contains
         do face_idx = 1, face_count
             call gather_face_vertices(boundary_faces%elements(face_idx), boundary_faces%face_ids(face_idx), kvert, node_ids)
             face_normals(:, face_idx) = compute_face_normal(coords, node_ids)
+            face_inflow_eps(face_idx) = compute_face_inflow_epsilon(coords, node_ids)
             if (check_all_vertices_on_plane(coords, node_ids, 1, plane_values(1), classification%tolerance)) then
                 face_flags(1, face_idx) = .true.
                 if (face_planes(face_idx) == 0) face_planes(face_idx) = 1
@@ -393,7 +399,7 @@ contains
         end do
 
         call assign_box_inflows(process, coords, kvert, boundary_faces, face_planes, face_flags, inflow_face_mask, &
-            face_normals, classification, classification%tolerance)
+            face_normals, face_inflow_eps, classification)
 
         call subset_face_list(boundary_faces, face_flags(1, :), classification%x_min_faces)
         call subset_face_list(boundary_faces, face_flags(2, :), classification%x_max_faces)
@@ -415,10 +421,11 @@ contains
         deallocate(face_planes)
         deallocate(inflow_face_mask)
         deallocate(face_normals)
+        deallocate(face_inflow_eps)
     end subroutine classify_box_boundaries
 
     subroutine assign_box_inflows(process, coords, kvert, boundary_faces, face_planes, face_flags, inflow_face_mask, &
-            face_normals, classification, tolerance)
+            face_normals, face_inflow_eps, classification)
         type(ProcessParameters), intent(in) :: process
         real(c_double), intent(in) :: coords(:, :)
         integer(c_int), intent(in) :: kvert(:, :)
@@ -427,17 +434,18 @@ contains
         logical, intent(inout) :: face_flags(:, :)
         logical, intent(inout) :: inflow_face_mask(:)
         real(c_double), intent(in) :: face_normals(:, :)
+        real(c_double), intent(in) :: face_inflow_eps(:)
         type(BoxBoundaryClassification), intent(inout) :: classification
-        real(c_double), intent(in) :: tolerance
 
         integer :: face_count, inflow_idx, face_idx, inflow_count
         logical, allocatable :: mask(:)
         integer :: node_ids(4)
-        real(c_double) :: eps
+        real(c_double) :: eps, tol_floor
 
         face_count = boundary_faces%count
         if (face_count /= size(face_planes)) return
         if (size(face_flags, 2) /= face_count) return
+        if (size(face_inflow_eps) /= face_count) return
         if (size(inflow_face_mask) /= face_count) return
 
         if (.not. process%loaded .or. process%nOfInflows <= 0) then
@@ -461,7 +469,7 @@ contains
         if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
         allocate(classification%inflow_groups(inflow_count))
         allocate(mask(face_count))
-        eps = max(tolerance, real(get_tolerance_floor(), kind=c_double))
+        tol_floor = real(get_tolerance_floor(), kind=c_double)
 
         do inflow_idx = 1, inflow_count
             call init_face_list(classification%inflow_groups(inflow_idx)%faces)
@@ -476,6 +484,7 @@ contains
             do face_idx = 1, face_count
                 if (face_planes(face_idx) == 0) cycle
                 if (inflow_face_mask(face_idx)) cycle
+                eps = max(face_inflow_eps(face_idx), tol_floor)
                 call gather_face_vertices(boundary_faces%elements(face_idx), boundary_faces%face_ids(face_idx), kvert, node_ids)
                 if (face_matches_inflow(process%inflows(inflow_idx), coords, node_ids, face_normals(:, face_idx), eps)) then
                     mask(face_idx) = .true.
@@ -492,28 +501,29 @@ contains
     end subroutine assign_box_inflows
 
     subroutine assign_cylinder_inflows(process, coords, kvert, boundary_faces, face_category, face_normals, &
-            face_is_outer, face_is_inner, face_is_axial_min, face_is_axial_max, inflow_face_mask, classification, &
-            tolerance)
+            face_inflow_eps, face_is_outer, face_is_inner, face_is_axial_min, face_is_axial_max, inflow_face_mask, &
+            classification)
         type(ProcessParameters), intent(in) :: process
         real(c_double), intent(in) :: coords(:, :)
         integer(c_int), intent(in) :: kvert(:, :)
         type(FaceList), intent(in) :: boundary_faces
         integer, intent(inout) :: face_category(:)
         real(c_double), intent(in) :: face_normals(:, :)
+        real(c_double), intent(in) :: face_inflow_eps(:)
         logical, intent(inout) :: face_is_outer(:), face_is_inner(:)
         logical, intent(inout) :: face_is_axial_min(:), face_is_axial_max(:)
         logical, intent(inout) :: inflow_face_mask(:)
         type(HollowCylinderBoundaryClassification), intent(inout) :: classification
-        real(c_double), intent(in) :: tolerance
 
         integer :: face_count, inflow_idx, face_idx, inflow_count
         logical, allocatable :: mask(:)
         integer :: node_ids(4)
-        real(c_double) :: eps
+        real(c_double) :: eps, tol_floor
 
         face_count = boundary_faces%count
         if (face_count /= size(face_category)) return
         if (size(face_normals, 2) /= face_count) return
+        if (size(face_inflow_eps) /= face_count) return
         if (size(inflow_face_mask) /= face_count) return
 
         if (.not. process%loaded .or. process%nOfInflows <= 0) then
@@ -537,7 +547,7 @@ contains
         if (allocated(classification%inflow_groups)) deallocate(classification%inflow_groups)
         allocate(classification%inflow_groups(inflow_count))
         allocate(mask(face_count))
-        eps = max(tolerance, real(get_tolerance_floor(), kind=c_double))
+        tol_floor = real(get_tolerance_floor(), kind=c_double)
 
         do inflow_idx = 1, inflow_count
             call init_face_list(classification%inflow_groups(inflow_idx)%faces)
@@ -552,6 +562,7 @@ contains
             do face_idx = 1, face_count
                 if (face_category(face_idx) == 0) cycle
                 if (inflow_face_mask(face_idx)) cycle
+                eps = max(face_inflow_eps(face_idx), tol_floor)
                 call gather_face_vertices(boundary_faces%elements(face_idx), boundary_faces%face_ids(face_idx), kvert, node_ids)
                 if (face_matches_inflow(process%inflows(inflow_idx), coords, node_ids, face_normals(:, face_idx), eps)) then
                     mask(face_idx) = .true.
@@ -805,6 +816,36 @@ contains
         length = norm2_vec(normal)
         if (length > 0.0_c_double) normal = normal / length
     end function compute_face_normal
+
+    real(c_double) function compute_face_inflow_epsilon(coords, node_ids) result(eps)
+        real(c_double), intent(in) :: coords(:, :)
+        integer, intent(in) :: node_ids(:)
+
+        integer, parameter :: local_edges(2, 4) = reshape([ &
+            1, 2, &
+            2, 3, &
+            3, 4, &
+            4, 1], [2, 4])
+        integer :: edge_idx
+        real(c_double) :: max_len, current_len
+        real(c_double) :: diff(3)
+
+        max_len = 0.0_c_double
+        if (size(node_ids) < 2) then
+            eps = 0.0_c_double
+            return
+        end if
+
+        do edge_idx = 1, size(local_edges, 2)
+            if (maxval(local_edges(:, edge_idx)) > size(node_ids)) cycle
+            diff = coords(:, node_ids(local_edges(1, edge_idx))) - &
+                coords(:, node_ids(local_edges(2, edge_idx)))
+            current_len = norm2_vec(diff)
+            if (current_len > max_len) max_len = current_len
+        end do
+
+        eps = 0.5_c_double * max_len
+    end function compute_face_inflow_epsilon
 
     pure function cross_product(a, b) result(c)
         real(c_double), intent(in) :: a(3), b(3)

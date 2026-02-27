@@ -3,7 +3,8 @@ program fortran_cgal_demo
     use iso_fortran_env, only: output_unit, int64
     use mpi
     use bc_treatment, only: recompute_knpr_from_connectivity, HollowCylinderBoundaryClassification, &
-        classify_hollowcylinder_boundaries, BoxBoundaryClassification, classify_box_boundaries, FaceList
+        classify_hollowcylinder_boundaries, BoxBoundaryClassification, classify_box_boundaries, FaceList, &
+        InflowBoundaryGroup
     use setupe3dfile_reader, only: MeshConfig, initialize_mesh_config, load_mesh_config, log_mesh_config, &
         ProcessParameters, initialize_process_parameters, load_process_parameters, log_process_inflows
     implicit none
@@ -136,6 +137,7 @@ program fortran_cgal_demo
     integer(c_int), allocatable :: filtered_kvert(:, :)
     integer(c_int), allocatable :: filtered_knpr(:)
     integer(c_int), allocatable :: filtered_monitor(:)
+    integer(c_int), allocatable :: node_inflow_ids(:)
     integer(c_int), allocatable :: filtered_kadj(:, :)
     real(c_double), allocatable :: filtered_volumes(:)
     integer :: filtered_nel, filtered_nvt
@@ -404,6 +406,9 @@ program fortran_cgal_demo
         call build_hex_adjacency(filtered_kvert, filtered_kadj)
         call validate_hex_connectivity(filtered_kadj)
         call recompute_knpr_from_connectivity(filtered_kvert, filtered_knpr, boundary_faces)
+        if (allocated(node_inflow_ids)) deallocate(node_inflow_ids)
+        allocate(node_inflow_ids(filtered_nvt))
+        node_inflow_ids = 0_c_int
         if (mesh_config%loaded) then
             select case (trim(mesh_config%mesh_type))
             case ("HollowCylinder")
@@ -411,12 +416,14 @@ program fortran_cgal_demo
                     filtered_knpr, boundary_faces, hc_boundary)
                 hc_summary_ready = .true.
                 call write_hc_parametrizations(mesh_output_folder, hc_boundary, meshdir_files, meshdir_file_count)
+                call populate_hc_inflow_field(hc_boundary, node_inflow_ids)
             case ("Box")
                 call classify_box_boundaries(mesh_config, process_params, filtered_coords, filtered_kvert, filtered_knpr, &
                     boundary_faces, &
                     box_boundary)
                 box_summary_ready = .true.
                 call write_box_parametrizations(mesh_output_folder, box_boundary, meshdir_files, meshdir_file_count)
+                call populate_box_inflow_field(box_boundary, node_inflow_ids)
             end select
         end if
         call write_single_tri(filtered_tri_file, header_line1, header_line2, filtered_nel, filtered_nvt, hex_nbct, &
@@ -425,9 +432,10 @@ program fortran_cgal_demo
                               hex_nve, hex_nee, hex_nae, 0.1_c_double * filtered_coords, filtered_kvert, filtered_knpr)
         call append_file_record(meshdir_files, meshdir_file_count, "Filtered.tri")
         if (monitor_data_available) then
-            call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr, monitor_values=filtered_monitor)
+            call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr, inflow_ids=node_inflow_ids, &
+                monitor_values=filtered_monitor)
         else
-            call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr)
+            call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr, inflow_ids=node_inflow_ids)
         end if
         call write_project_file(mesh_output_folder, meshdir_files, meshdir_file_count)
     end if
@@ -754,6 +762,58 @@ contains
             end do
         end if
     end subroutine write_box_parametrizations
+
+    subroutine populate_hc_inflow_field(classification, inflow_ids)
+        type(HollowCylinderBoundaryClassification), intent(in) :: classification
+        integer(c_int), intent(inout) :: inflow_ids(:)
+
+        if (allocated(classification%inflow_groups)) then
+            call assign_inflow_groups_to_nodes(classification%inflow_groups, inflow_ids)
+        end if
+        if (allocated(classification%axial_max_nodes)) then
+            call stamp_nodes_with_value(classification%axial_max_nodes, -1_c_int, inflow_ids)
+        end if
+    end subroutine populate_hc_inflow_field
+
+    subroutine populate_box_inflow_field(classification, inflow_ids)
+        type(BoxBoundaryClassification), intent(in) :: classification
+        integer(c_int), intent(inout) :: inflow_ids(:)
+
+        if (allocated(classification%inflow_groups)) then
+            call assign_inflow_groups_to_nodes(classification%inflow_groups, inflow_ids)
+        end if
+        if (allocated(classification%z_max_nodes)) then
+            call stamp_nodes_with_value(classification%z_max_nodes, -1_c_int, inflow_ids)
+        end if
+    end subroutine populate_box_inflow_field
+
+    subroutine assign_inflow_groups_to_nodes(groups, inflow_ids)
+        type(InflowBoundaryGroup), intent(in) :: groups(:)
+        integer(c_int), intent(inout) :: inflow_ids(:)
+        integer :: inflow_idx
+        integer(c_int) :: inflow_value
+
+        if (size(groups) == 0) return
+        do inflow_idx = 1, size(groups)
+            if (.not. allocated(groups(inflow_idx)%nodes)) cycle
+            inflow_value = int(groups(inflow_idx)%inflow_index, kind=c_int)
+            call stamp_nodes_with_value(groups(inflow_idx)%nodes, inflow_value, inflow_ids)
+        end do
+    end subroutine assign_inflow_groups_to_nodes
+
+    subroutine stamp_nodes_with_value(nodes, value, inflow_ids)
+        integer, intent(in) :: nodes(:)
+        integer(c_int), intent(in) :: value
+        integer(c_int), intent(inout) :: inflow_ids(:)
+        integer :: idx, node_id, limit
+
+        limit = size(inflow_ids)
+        do idx = 1, size(nodes)
+            node_id = nodes(idx)
+            if (node_id < 1 .or. node_id > limit) cycle
+            inflow_ids(node_id) = value
+        end do
+    end subroutine stamp_nodes_with_value
 
     subroutine write_par_file(folder, filename, nodes, keyword, recorded_files, record_count)
         character(len=*), intent(in) :: folder, filename
@@ -1289,11 +1349,12 @@ contains
         close(unit)
     end subroutine write_single_tri
 
-    subroutine write_vtu(filename, coords, kvert, knpr, monitor_values)
+    subroutine write_vtu(filename, coords, kvert, knpr, inflow_ids, monitor_values)
         character(len=*), intent(in) :: filename
         real(c_double), intent(in) :: coords(:, :)
         integer(c_int), intent(in) :: kvert(:, :)
         integer(c_int), intent(in) :: knpr(:)
+        integer(c_int), intent(in), optional :: inflow_ids(:)
         integer(c_int), intent(in), optional :: monitor_values(:)
 
         integer :: unit, nvt, nel, nve
@@ -1314,6 +1375,12 @@ contains
         write(unit, '(A)') '        <DataArray type="Int32" Name="KNPR" format="ascii">'
         write(unit, '(6(1X,I8))') (int(knpr(i), kind=4), i = 1, nvt)
         write(unit, '(A)') '        </DataArray>'
+        if (present(inflow_ids)) then
+            if (size(inflow_ids) /= nvt) error stop "VTU inflow array size mismatch."
+            write(unit, '(A)') '        <DataArray type="Int32" Name="InflowId" format="ascii">'
+            write(unit, '(6(1X,I8))') (int(inflow_ids(i), kind=4), i = 1, nvt)
+            write(unit, '(A)') '        </DataArray>'
+        end if
         write(unit, '(A)') '      </PointData>'
 
         if (present(monitor_values)) then

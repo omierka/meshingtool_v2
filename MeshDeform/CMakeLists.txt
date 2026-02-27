@@ -1,4 +1,5 @@
 find_package(CGAL REQUIRED COMPONENTS Core)
+find_package(MPI REQUIRED)
 
 add_executable(meshdeform
   src/def.f90
@@ -14,5 +15,6 @@ set_target_properties(meshdeform
 )
 
 target_link_libraries(meshdeform PRIVATE CGAL::CGAL CGAL::CGAL_Core cgal_wrapper)
+target_link_libraries(meshdeform PRIVATE MPI::MPI_Fortran)
 
 install(TARGETS meshdeform DESTINATION bin)

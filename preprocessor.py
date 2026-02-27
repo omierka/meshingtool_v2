@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import os
 import re
 import shutil
@@ -41,6 +42,11 @@ Stage legend:
 
 
 @dataclass
+class DriverConfig:
+    monitor_zero_bin_threshold_percent: float = 1.0e-12
+
+
+@dataclass
 class CaseResult:
     folder: Path
     mindist: Optional[float]
@@ -64,6 +70,7 @@ class CaseRunner:
         cleanup: bool,
         silent: bool,
         base_env: Dict[str, str],
+        driver_config: DriverConfig,
         stage_callback: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         self.script_dir = script_dir
@@ -73,6 +80,7 @@ class CaseRunner:
         self.silent = silent
         self.env = dict(base_env)
         self.stage_callback = stage_callback
+        self.monitor_zero_bin_threshold_percent = driver_config.monitor_zero_bin_threshold_percent
 
         self.monitor_summary_file = self.folder / "monitor_summary.txt"
         self.monitor_summary_vol_file = self.folder / "monitor_summary_volumetric.txt"
@@ -140,7 +148,15 @@ class CaseRunner:
                     shutil.rmtree(path, ignore_errors=True)
                 else:
                     path.unlink(missing_ok=True)
-        for file_name in ("area.txt",):
+        extra_files = (
+            "area.txt",
+            "coarse_size_distribution_histogram.txt",
+            "hex_intersection_intersections.pvtu",
+            "hex_intersection_tets.pvtu",
+            "hex_mesh.pvtu",
+            "size_distribution_histogram.txt",
+        )
+        for file_name in extra_files:
             (self.folder / file_name).unlink(missing_ok=True)
         self.monitor_summary_file.unlink(missing_ok=True)
         self.monitor_summary_vol_file.unlink(missing_ok=True)
@@ -300,7 +316,8 @@ class CaseRunner:
 
     def _maybe_apply_monitor_correction(self) -> None:
         volum_zero = self._read_monitor_first_bin_percent(self.monitor_summary_vol_file)
-        if volum_zero is None or abs(volum_zero) > 1e-12:
+        threshold = max(self.monitor_zero_bin_threshold_percent, 0.0)
+        if volum_zero is None or volum_zero > threshold:
             return
         assert self.coarse_mesh_size_value is not None
         assert self.span_value is not None
@@ -351,6 +368,29 @@ class CaseRunner:
             iteration_marker_used=self.iteration_marker_used,
             cleanup_performed=False,
         )
+
+
+def load_driver_config(config_path: Path) -> DriverConfig:
+    """Load optional driver-specific settings from preprocessor.cfg."""
+    config = configparser.ConfigParser(
+        interpolation=None,
+        comment_prefixes=("#", ";"),
+        inline_comment_prefixes=("#", ";"),
+    )
+    driver_settings = DriverConfig()
+    read_files = config.read(config_path, encoding="utf-8")
+    if not read_files or not config.has_section("Driver"):
+        return driver_settings
+    section = config["Driver"]
+    raw_threshold = section.get("monitor_zero_bin_threshold_percent")
+    if raw_threshold is not None:
+        try:
+            driver_settings.monitor_zero_bin_threshold_percent = float(raw_threshold)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid monitor_zero_bin_threshold_percent '{raw_threshold}' in {config_path}"
+            ) from exc
+    return driver_settings
 
 
 def ensure_required_binaries(script_dir: Path) -> None:
@@ -417,24 +457,39 @@ def read_mesh_counts(filtered_tri: Path) -> tuple[int, int]:
     raise RuntimeError(f"Unable to parse NEL/NVT from '{filtered_tri}'")
 
 
-def read_monitor_summary(case_path: Path) -> str:
-    summary = case_path / "monitor_summary.txt"
+def read_monitor_summary(case_path: Path, filename: str = "monitor_summary.txt") -> str:
+    summary = case_path / filename
     if not summary.exists():
         return ""
-    return summary.read_text(encoding="utf-8").strip()
+    # Only keep the portion starting at the 0-bin definition, e.g. "0=[...]".
+    for line in summary.read_text(encoding="utf-8").splitlines():
+        zero_idx = line.find("0=")
+        if zero_idx != -1:
+            return line[zero_idx:].strip()
+    return ""
 
 
 def cleanup_case_pngs(case_path: Path) -> None:
     for png in case_path.glob("*.png"):
         if png.is_file():
             png.unlink()
-    histogram = case_path / "size_distribution_histogram.txt"
-    histogram.unlink(missing_ok=True)
+    extra_files = (
+        "size_distribution_histogram.txt",
+        "coarse_size_distribution_histogram.txt",
+        "hex_intersection_intersections.pvtu",
+        "hex_intersection_tets.pvtu",
+        "hex_mesh.pvtu",
+    )
+    for file_name in extra_files:
+        (case_path / file_name).unlink(missing_ok=True)
 
 
 def run_case_command(args: argparse.Namespace, script_dir: Path) -> None:
     ensure_required_binaries(script_dir)
     env = prepare_base_environment(script_dir, args.skip_modules)
+    config_location = env.get("PREPROCESSOR_CONFIG") or str(script_dir / "preprocessor.cfg")
+    config_path = Path(config_location)
+    driver_config = load_driver_config(config_path)
     runner = CaseRunner(
         folder=Path(args.folder),
         script_dir=script_dir,
@@ -442,6 +497,7 @@ def run_case_command(args: argparse.Namespace, script_dir: Path) -> None:
         cleanup=args.cleanup,
         silent=args.silent,
         base_env=env,
+        driver_config=driver_config,
     )
     try:
         result = runner.run()
@@ -464,6 +520,9 @@ def run_all_command(args: argparse.Namespace, script_dir: Path) -> None:
         raise SystemExit(f"No cases found under '{resolved_cases_dir}'")
 
     env = prepare_base_environment(script_dir, args.skip_modules)
+    config_location = env.get("PREPROCESSOR_CONFIG") or str(script_dir / "preprocessor.cfg")
+    config_path = Path(config_location)
+    driver_config = load_driver_config(config_path)
     print(STAGE_LEGEND)
     case_names = [case.name for case in cases]
     name_width = max(len(name) for name in case_names)
@@ -486,6 +545,7 @@ def run_all_command(args: argparse.Namespace, script_dir: Path) -> None:
             cleanup=args.clean,
             silent=True,
             base_env=env,
+            driver_config=driver_config,
             stage_callback=stage_printer,
         )
         try:
@@ -504,8 +564,11 @@ def run_all_command(args: argparse.Namespace, script_dir: Path) -> None:
             continue
 
         filtered_tri = case_path / "Filtered.tri"
-        nel, nvt = read_mesh_counts(filtered_tri)
+        nel, _ = read_mesh_counts(filtered_tri)
         monitor_summary = read_monitor_summary(case_path)
+        monitor_summary_vol = read_monitor_summary(
+            case_path, "monitor_summary_volumetric.txt"
+        )
 
         elapsed = format_duration(result.duration)
         print(" :: ", end="")
@@ -518,13 +581,11 @@ def run_all_command(args: argparse.Namespace, script_dir: Path) -> None:
             if result.span:
                 print(f" span={result.span}", end="")
         formatted_nel = f"{nel:,}"
-        formatted_nvt = f"{nvt:,}"
-        print(
-            f"  :: NEL={formatted_nel:>{nel_column_width}} NVT={formatted_nvt:>{nel_column_width}}",
-            end="",
-        )
+        print(f"  :: NEL={formatted_nel:>{nel_column_width}}", end="")
         if monitor_summary:
-            print(f"  {monitor_summary}", end="")
+            print(f"  [COUNT]: {monitor_summary}", end="")
+        if monitor_summary_vol:
+            print(f"  [VOLUME]: {monitor_summary_vol}", end="")
         print()
 
 
