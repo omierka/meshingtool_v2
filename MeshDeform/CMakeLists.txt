@@ -5,7 +5,7 @@ add_executable(meshdeform
   src/def.f90
   src/inout.f90
   src/main.f90
-  ${CMAKE_SOURCE_DIR}/MeshCleaner/setupe3dfile_reader.f90
+  ${CMAKE_SOURCE_DIR}/common/setupe3dfile_reader.f90
   ${CMAKE_SOURCE_DIR}/common/preprocessor_config.f90
 )
 

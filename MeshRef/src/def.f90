@@ -7,6 +7,12 @@ module def_mod
                      release_mesh_levels, reproducibility, refinement_depth, Monitor_threshold, &
                      apply_cylindric_transform, cylindrical_outer_radius
   use preprocessor_config_mod, only: get_fullcyl_min_radius_percentage, get_fullcyl_max_radius_percentage
+  use setupe3dfile_reader, only: MeshConfig, ProcessParameters, initialize_mesh_config, load_mesh_config, &
+                                 initialize_process_parameters, load_process_parameters
+  use bc_treatment, only: FaceList, BoxBoundaryClassification, HollowCylinderBoundaryClassification, &
+                          InflowBoundaryGroup, recompute_knpr_from_connectivity, classify_box_boundaries, &
+                          classify_hollowcylinder_boundaries
+  use iso_c_binding, only: c_double, c_int
   implicit none
   integer, parameter :: max_refinement_depth = 2
   integer, parameter :: face_vertex_map(4, 6) = reshape([ &
@@ -256,6 +262,123 @@ contains
 
     deallocate(vertex_counts, vertex_offsets, vertex_elems, fill_counts, neighbor_marks, neighbor_buffer)
   end subroutine build_target_element_span
+
+  subroutine build_face_adjacency(mesh)
+    type(mesh_type), intent(inout) :: mesh
+    integer :: nel, total_faces, elem, face, node, face_idx
+    integer :: group_start, group_end
+    integer, allocatable :: face_keys(:, :)
+    integer, allocatable :: face_owner(:), face_local(:), order(:)
+
+    if (.not.allocated(mesh%kvert)) return
+    nel = mesh%nel
+    if (nel <= 0) return
+
+    total_faces = 6 * nel
+    if (allocated(mesh%kadj)) then
+       deallocate(mesh%kadj)
+    end if
+    allocate(mesh%kadj(6, nel))
+    mesh%kadj = 0
+
+    allocate(face_keys(4, total_faces))
+    allocate(face_owner(total_faces))
+    allocate(face_local(total_faces))
+    allocate(order(total_faces))
+
+    face_idx = 0
+    do elem = 1, nel
+       do face = 1, 6
+          face_idx = face_idx + 1
+          do node = 1, 4
+             face_keys(node, face_idx) = mesh%kvert(face_vertex_map(node, face), elem)
+          end do
+          call sort_face_nodes(face_keys(:, face_idx))
+          face_owner(face_idx) = elem
+          face_local(face_idx) = face
+          order(face_idx) = face_idx
+       end do
+    end do
+
+    call sort_face_records(face_keys, order)
+
+    face_idx = 1
+    do while (face_idx <= total_faces)
+       group_start = face_idx
+       group_end = face_idx
+       do while (group_end < total_faces)
+          if (.not.faces_have_same_key(face_keys, order(group_end), order(group_end + 1))) exit
+          group_end = group_end + 1
+       end do
+       if (group_end == group_start + 1) then
+          call connect_face_pair(face_owner(order(group_start)), face_local(order(group_start)), &
+                                 face_owner(order(group_end)), face_local(order(group_end)))
+       else if (group_end > group_start + 1) then
+          write(*, '(A)') 'Warning: more than two faces share identical connectivity; adjacency may be ambiguous.'
+          call connect_face_pair(face_owner(order(group_start)), face_local(order(group_start)), &
+                                 face_owner(order(group_start + 1)), face_local(order(group_start + 1)))
+       end if
+       face_idx = group_end + 1
+    end do
+
+    deallocate(face_keys, face_owner, face_local, order)
+
+  contains
+
+    subroutine connect_face_pair(elem_a, face_a, elem_b, face_b)
+      integer, intent(in) :: elem_a, face_a, elem_b, face_b
+
+      if (elem_a < 1 .or. elem_a > size(mesh%kadj, 2)) return
+      if (elem_b < 1 .or. elem_b > size(mesh%kadj, 2)) return
+      if (face_a < 1 .or. face_a > size(mesh%kadj, 1)) return
+      if (face_b < 1 .or. face_b > size(mesh%kadj, 1)) return
+
+      mesh%kadj(face_a, elem_a) = elem_b
+      mesh%kadj(face_b, elem_b) = elem_a
+    end subroutine connect_face_pair
+
+    subroutine sort_face_records(keys, order)
+      integer, intent(in) :: keys(:, :)
+      integer, intent(inout) :: order(:)
+      integer :: i, j, key
+
+      do i = 2, size(order)
+         key = order(i)
+         j = i - 1
+         do while (j >= 1)
+            if (.not.face_key_less(keys, key, order(j))) exit
+            order(j + 1) = order(j)
+            j = j - 1
+         end do
+         order(j + 1) = key
+      end do
+    end subroutine sort_face_records
+
+    logical function face_key_less(keys, ia, ib)
+      integer, intent(in) :: keys(:, :)
+      integer, intent(in) :: ia, ib
+      integer :: idx
+
+      face_key_less = .false.
+      do idx = 1, size(keys, 1)
+         if (keys(idx, ia) < keys(idx, ib)) then
+            face_key_less = .true.
+            return
+         else if (keys(idx, ia) > keys(idx, ib)) then
+            face_key_less = .false.
+            return
+         end if
+      end do
+    end function face_key_less
+
+    logical function faces_have_same_key(keys, ia, ib)
+      integer, intent(in) :: keys(:, :)
+      integer, intent(in) :: ia, ib
+
+      faces_have_same_key = all(keys(:, ia) == keys(:, ib))
+    end function faces_have_same_key
+
+  end subroutine build_face_adjacency
 
   subroutine sort_face_nodes(nodes)
     integer, intent(inout) :: nodes(4)
@@ -599,6 +722,159 @@ contains
        if (.not.changed) exit
     end do
   end subroutine enforce_refinement_levels
+
+  subroutine apply_inflow_refinement_boost(mesh, setup_path, changed)
+    type(mesh_type), intent(inout) :: mesh
+    character(len=*), intent(in) :: setup_path
+    logical, intent(out) :: changed
+
+    type(MeshConfig) :: mesh_config
+    type(ProcessParameters) :: process_params
+    type(FaceList) :: boundary_faces
+    type(BoxBoundaryClassification) :: box_boundary
+    type(HollowCylinderBoundaryClassification) :: cyl_boundary
+    real(c_double), allocatable :: coords(:, :)
+    integer(c_int), allocatable :: kvert(:, :)
+    integer(c_int), allocatable :: knpr(:)
+    logical, allocatable :: inflow_mask(:)
+    integer :: nel, nvt, elem, boosted
+    logical :: file_exists, is_box_mesh, is_cyl_mesh
+    character(len=64) :: type_token
+
+    changed = .false.
+    inquire(file=trim(setup_path), exist=file_exists)
+    if (.not.file_exists) return
+    if (mesh%nel <= 0 .or. mesh%nvt <= 0) return
+    if (.not.allocated(mesh%monitor)) return
+
+    call initialize_mesh_config(mesh_config)
+    call load_mesh_config(trim(setup_path), mesh_config)
+    if (.not.mesh_config%loaded) return
+
+    call initialize_process_parameters(process_params)
+    call load_process_parameters(trim(setup_path), process_params)
+    if (process_params%nOfInflows <= 0) return
+    if (.not.allocated(process_params%inflows)) return
+
+    type_token = lowercase_string(trim(mesh_config%mesh_type))
+    is_box_mesh = (type_token == 'box')
+    is_cyl_mesh = (type_token == 'hollowcylinder' .or. type_token == 'fullcylinder')
+    if (.not.(is_box_mesh .or. is_cyl_mesh)) then
+       write(*, '(A)') 'Unsupported HexMesher type in setup.e3d: ' // trim(mesh_config%mesh_type)
+       stop 1
+    end if
+
+    nvt = mesh%nvt
+    nel = mesh%nel
+    allocate(coords(3, nvt))
+    coords = real(mesh%coor, kind=c_double)
+    allocate(kvert(8, nel))
+    kvert = int(mesh%kvert, kind=c_int)
+    allocate(knpr(nvt))
+    knpr = 0_c_int
+    allocate(inflow_mask(nel))
+    inflow_mask = .false.
+
+    call recompute_knpr_from_connectivity(kvert, knpr, boundary_faces)
+
+    if (is_box_mesh) then
+       call classify_box_boundaries(mesh_config, process_params, coords, kvert, knpr, boundary_faces, box_boundary)
+       if (allocated(box_boundary%inflow_groups)) then
+          call mark_inflow_elements(box_boundary%inflow_groups, inflow_mask)
+       end if
+    else
+        call classify_hollowcylinder_boundaries(mesh_config, process_params, coords, kvert, knpr, boundary_faces, &
+             cyl_boundary)
+        if (allocated(cyl_boundary%inflow_groups)) then
+           call mark_inflow_elements(cyl_boundary%inflow_groups, inflow_mask)
+        end if
+    end if
+
+    if (.not.any(inflow_mask)) then
+       call cleanup_inflow_buffers()
+       return
+    end if
+
+    if (.not.allocated(mesh%kadj)) call build_face_adjacency(mesh)
+
+    boosted = 0
+    do elem = 1, min(nel, size(mesh%monitor))
+       if (.not.inflow_mask(elem)) cycle
+       if (.not.element_is_boundary(mesh, elem)) cycle
+       if (mesh%monitor(elem) >= refinement_depth) cycle
+       mesh%monitor(elem) = mesh%monitor(elem) + 1
+       boosted = boosted + 1
+    end do
+
+    if (boosted > 0) then
+       changed = .true.
+       write(*, '(A,I0)') 'Inflow refinement boost applied to elements: ', boosted
+    else
+       write(*, '(A)') 'No boundary elements matched inflow definitions for refinement boost.'
+    end if
+
+    call cleanup_inflow_buffers()
+
+  contains
+
+    subroutine cleanup_inflow_buffers()
+      if (allocated(coords)) deallocate(coords)
+      if (allocated(kvert))  deallocate(kvert)
+      if (allocated(knpr))   deallocate(knpr)
+      if (allocated(inflow_mask)) deallocate(inflow_mask)
+    end subroutine cleanup_inflow_buffers
+
+  end subroutine apply_inflow_refinement_boost
+
+  subroutine mark_inflow_elements(groups, mask)
+    type(InflowBoundaryGroup), intent(in) :: groups(:)
+    logical, intent(inout) :: mask(:)
+    integer :: inflow_idx, face_idx, elem
+
+    if (size(mask) <= 0) return
+
+    do inflow_idx = 1, size(groups)
+       if (groups(inflow_idx)%faces%count <= 0) cycle
+       do face_idx = 1, groups(inflow_idx)%faces%count
+          elem = groups(inflow_idx)%faces%elements(face_idx)
+          if (elem >= 1 .and. elem <= size(mask)) mask(elem) = .true.
+       end do
+    end do
+  end subroutine mark_inflow_elements
+
+  logical function element_is_boundary(mesh, elem)
+    type(mesh_type), intent(in) :: mesh
+    integer, intent(in) :: elem
+    integer :: face, max_faces
+
+    element_is_boundary = .false.
+    if (.not.allocated(mesh%kadj)) return
+    if (elem < 1 .or. elem > size(mesh%kadj, 2)) return
+
+    max_faces = min(size(mesh%kadj, 1), 6)
+    do face = 1, max_faces
+       if (mesh%kadj(face, elem) <= 0) then
+          element_is_boundary = .true.
+          return
+       end if
+    end do
+  end function element_is_boundary
+
+  pure function lowercase_string(text) result(out)
+    character(len=*), intent(in) :: text
+    character(len=len(text)) :: out
+    integer :: idx, code
+
+    out = text
+    do idx = 1, len(text)
+       code = iachar(text(idx:idx))
+       if (code >= iachar('A') .and. code <= iachar('Z')) then
+          out(idx:idx) = achar(code + 32)
+       else
+          out(idx:idx) = text(idx:idx)
+       end if
+    end do
+  end function lowercase_string
 
   subroutine report_refinement_distribution(mesh, label)
     type(mesh_type), intent(in) :: mesh

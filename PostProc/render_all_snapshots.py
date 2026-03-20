@@ -138,7 +138,7 @@ def _build_batch_command(
         ]
     )
     if module_name:
-        return f"module load {shlex.quote(module_name)} && {pvbatch_cmd}"
+        return f"module purge && module load {shlex.quote(module_name)} && {pvbatch_cmd}"
     return pvbatch_cmd
 
 

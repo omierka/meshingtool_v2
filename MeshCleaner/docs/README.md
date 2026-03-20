@@ -3,7 +3,7 @@
 This project demonstrates how to expose a subset of CGAL’s C++ API to Fortran via `ISO_C_BINDING` and then run a full hex-mesh filtering pipeline in Fortran.  The workflow is split into two parts:
 
 1. `src/cgal_interface.cpp` loads an OFF surface with CGAL, triangulates it, and exposes a small C API to query raw vertex/triangle buffers.
-2. `src/fortran_driver.f90` (with helpers in `src/bc_treatment.f90`) reads the hexahedral mesh (either the legacy `*.tri` format or ASCII VTK `*.vtu` hexahedra), calls the CGAL wrapper, filters elements, recomputes boundary flags, classifies boundary faces, and writes all derived outputs.
+2. `src/fortran_driver.f90` (with helpers in `common/bc_treatment.f90`) reads the hexahedral mesh (either the legacy `*.tri` format or ASCII VTK `*.vtu` hexahedra), calls the CGAL wrapper, filters elements, recomputes boundary flags, classifies boundary faces, and writes all derived outputs.
 
 The driver understands the three supported parametrisations today—**FullCylinder**, **HollowCylinder**, and **Box**—and can be extended as new mesh types appear.
 
@@ -44,7 +44,7 @@ mpirun -np 8 ./build/src/fortran_cgal \
     -o PROFEX
 ```
 
-When `-o` is supplied the driver looks for `<output>/setup.e3d`.  That file (the standard pre-processor export) stores both the mesh description (Box, HollowCylinder, or FullCylinder plus sizing) and the process inflow definitions inside the `[E3DGeometryData/PreProcessing]` section.  The parser lives in `setupe3dfile_reader.f90`.
+When `-o` is supplied the driver looks for `<output>/setup.e3d`.  That file (the standard pre-processor export) stores both the mesh description (Box, HollowCylinder, or FullCylinder plus sizing) and the process inflow definitions inside the `[E3DGeometryData/PreProcessing]` section.  The parser lives in `common/setupe3dfile_reader.f90`.
 
 The driver now requires at least **two** MPI ranks: rank 0 handles orchestration/output only, while ranks ≥1 process the hexahedral workload. Rank 0 still reduces the filtered mesh, writes files, and prints the boundary summaries.
 
@@ -65,7 +65,7 @@ The driver now requires at least **two** MPI ranks: rank 0 handles orchestration
 
 ## Boundary classification and outputs
 
-The helper module `bc_treatment.f90` owns the classification logic:
+The helper module `common/bc_treatment.f90` owns the classification logic:
 
 - The shortest hexahedral edge in the filtered mesh is located and its half-length becomes the *tolerance*—reported in the console—to decide whether a face belongs to a parametrisation.
 - **HollowCylinder**: outer cylinder, inner cylinder, axial min plane, axial max plane.  A face enters a bucket only if *all four* of its vertices satisfy the respective radius/plane equation within the tolerance.  “Inner wall” faces are those boundary faces that don’t match any of the four parametrisations.

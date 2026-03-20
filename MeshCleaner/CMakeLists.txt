@@ -6,8 +6,8 @@ target_compile_features(cgal_wrapper PRIVATE cxx_std_17)
 
 add_executable(meshcleaner
     fortran_driver.f90
-    bc_treatment.f90
-    setupe3dfile_reader.f90
+    ${CMAKE_SOURCE_DIR}/common/bc_treatment.f90
+    ${CMAKE_SOURCE_DIR}/common/setupe3dfile_reader.f90
     ${CMAKE_SOURCE_DIR}/common/preprocessor_config.f90
 )
 target_link_libraries(meshcleaner PRIVATE cgal_wrapper)

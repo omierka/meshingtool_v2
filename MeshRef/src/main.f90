@@ -1,8 +1,8 @@
 program meshref_main
   use def_mod, only: initialize_mesh_database, finalize_mesh_database, &
-                     load_target_mesh_file, build_target_element_span, mesh_refinement, random_element_marking, &
-                     vertice_marking, enforce_refinement_levels, load_monitor_file, &
-                     report_refinement_distribution, mark_elements_by_threshold
+                     load_target_mesh_file, build_target_element_span, build_face_adjacency, mesh_refinement, &
+                     random_element_marking, vertice_marking, enforce_refinement_levels, load_monitor_file, &
+                     report_refinement_distribution, mark_elements_by_threshold, apply_inflow_refinement_boost
   use inout_mod, only: write_patch_group_vtu, build_clean_output_path, &
                        build_refined_clean_output_path, build_level_output_path, write_refined_clean_tri
   use cleanup_mod, only: clear_intra_patches, clear_inter_patches, write_refined_clean_vtu, &
@@ -19,24 +19,32 @@ program meshref_main
   character(len=1024) :: clean_output_vtu_path
   character(len=1024) :: refined_clean_output_vtu_path
   character(len=1024) :: monitor_file_path
+  character(len=1024) :: setup_file_path
   character(len=1024) :: label
   integer :: random_percentage
   integer :: recursion_depth
   integer :: level
   real(rk) :: level_threshold
+  logical :: inflow_levels_changed
 
   call print_banner('MESHREF START')
   recursion_depth = default_refinement_depth
   Monitor_threshold = real(get_monitor_threshold_default(), rk)
   call parse_command_line(working_folder, random_percentage, recursion_depth)
+  if (random_percentage >= 0) then
+     write(*, '(A)') 'Random refinement (-r/--random-refinement) is not supported when inflow boosting is enabled.'
+     stop 1
+  end if
   input_mesh_path = trim(working_folder) // '/Coarse_meshDir/Mesh.tri'
   monitor_file_path = trim(working_folder) // '/area.txt'
+  setup_file_path = trim(working_folder) // '/setup.e3d'
   output_vtu_path = trim(working_folder) // '/RefinedCleanMesh.vtu'
 
   call initialize_mesh_database()
   call initialize_mesh_levels(recursion_depth)
   call load_target_mesh_file(trim(input_mesh_path))
   call build_target_element_span(hex_mesh(0))
+  call build_face_adjacency(hex_mesh(0))
   call load_monitor_file(hex_mesh(0), trim(monitor_file_path))
   if (random_percentage >= 0) call random_element_marking(random_percentage)
   level_threshold = Monitor_threshold
@@ -47,6 +55,12 @@ program meshref_main
      call enforce_refinement_levels(hex_mesh(0), level)
      if (random_percentage < 0 .and. level > 1) level_threshold = level_threshold / 3.0_rk
   end do
+  call apply_inflow_refinement_boost(hex_mesh(0), trim(setup_file_path), inflow_levels_changed)
+  if (inflow_levels_changed) then
+     do level = recursion_depth, 1, -1
+        call enforce_refinement_levels(hex_mesh(0), level)
+     end do
+  end if
   write(label, '(A,I0,A)') 'No Of Elements with Refinement depth [0..', recursion_depth, '] (smoothed)'
   call report_refinement_distribution(hex_mesh(0), trim(label))
 
@@ -175,7 +189,7 @@ contains
     write(*, '(A)') 'Usage: meshref -f <folder> [options]'
     write(*, '(A)') '       meshref --folder <folder> [options]'
     write(*, '(A)') 'Options:'
-    write(*, '(A)') '  -r, --random-refinement <0-100>  Fraction of nodes flagged for refinement.'
+    write(*, '(A)') '  -r, --random-refinement <0-100>  (disabled; area.txt + inflow boost required).'
     write(*, '(A)') '  -d, --depth <1-3>                Recursion depth (default 2).'
     write(*, '(A)') '  -h, --help                       Show this help text.'
     if (is_error) then
