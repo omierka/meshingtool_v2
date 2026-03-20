@@ -16,6 +16,8 @@ module preprocessor_config_mod
   real(real64) :: cfg_clip_eps = 1.0e-12_real64
   integer :: cfg_meshdeform_steps = 1
   real(real64) :: cfg_meshdeform_char_scale = 100.0_real64
+  real(real64) :: cfg_fullcyl_min_radius_pct = 20.0_real64
+  real(real64) :: cfg_fullcyl_max_radius_pct = 30.0_real64
 
   public :: get_cylinder_boundary_tolerance_factor
   public :: get_box_boundary_tolerance_factor
@@ -26,6 +28,8 @@ module preprocessor_config_mod
   public :: get_monitor_clip_epsilon
   public :: get_meshdeform_step_count
   public :: get_meshdeform_characteristic_scale
+  public :: get_fullcyl_min_radius_percentage
+  public :: get_fullcyl_max_radius_percentage
 
 contains
 
@@ -102,9 +106,14 @@ contains
         call assign_real(raw_value, cfg_inflow_cos_threshold)
       end select
     case ("3dmeshref")
-      if (trim(key) == "monitor_threshold_default") then
+      select case (trim(key))
+      case ("monitor_threshold_default")
         call assign_real(raw_value, cfg_monitor_threshold_default)
-      end if
+      case ("fullcylinderminradiuspercentage")
+        call assign_real(raw_value, cfg_fullcyl_min_radius_pct)
+      case ("fullcylindermaxradiuspercentage")
+        call assign_real(raw_value, cfg_fullcyl_max_radius_pct)
+      end select
     case ("3dmonitorgen")
       select case (trim(key))
       case ("triangle_tree_tol")
@@ -221,5 +230,15 @@ contains
       get_meshdeform_characteristic_scale = cfg_meshdeform_char_scale
     end if
   end function get_meshdeform_characteristic_scale
+
+  real(real64) function get_fullcyl_min_radius_percentage()
+    call ensure_config_loaded()
+    get_fullcyl_min_radius_percentage = max(0.0_real64, cfg_fullcyl_min_radius_pct)
+  end function get_fullcyl_min_radius_percentage
+
+  real(real64) function get_fullcyl_max_radius_percentage()
+    call ensure_config_loaded()
+    get_fullcyl_max_radius_percentage = max(0.0_real64, cfg_fullcyl_max_radius_pct)
+  end function get_fullcyl_max_radius_percentage
 
 end module preprocessor_config_mod

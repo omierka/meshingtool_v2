@@ -90,6 +90,7 @@ class CaseRunner:
         self.mindist_value: Optional[float] = None
         self.span_value: Optional[str] = None
         self.coarse_mesh_size_value: Optional[str] = None
+        self._coarse_scaling_factor: Optional[float] = None
 
     def _cmd_path(self, name: str) -> str:
         return str((self.script_dir / name).resolve())
@@ -187,9 +188,96 @@ class CaseRunner:
         self.mindist_value = float(mindist_raw)
         self.span_value = span_raw
         self.coarse_mesh_size_value = coarse_raw
+        self._coarse_scaling_factor = self._derive_coarse_scaling_factor(
+            self.mindist_value, span_raw, coarse_raw
+        )
         self._emit_info(f"mindist={mindist_raw}")
         self._emit_info(f"histogram_span={span_raw}")
         self._emit_info(f"CoarseMeshSize={coarse_raw}")
+        manual_mingap = self._read_manual_mingap_override()
+        if manual_mingap is not None:
+            self.mindist_value = manual_mingap
+            self._emit_info(f"mindist (manual override)={manual_mingap}")
+            self._recompute_coarse_mesh_size()
+
+    def _read_manual_mingap_override(self) -> Optional[float]:
+        config_path = self.folder / "setup.e3d"
+        if not config_path.is_file():
+            return None
+        parser = configparser.ConfigParser()
+        try:
+            if not parser.read(config_path):
+                return None
+        except configparser.Error:
+            return None
+        section = "E3DGeometryData/Preprocessing"
+        if not parser.has_section(section):
+            return None
+        raw_value = parser.get(section, "MinGap", fallback=None)
+        if raw_value is None:
+            return None
+        raw_value = raw_value.strip()
+        if not raw_value:
+            return None
+        try:
+            return float(raw_value)
+        except ValueError:
+            self._emit_info(
+                f"Warning: invalid MinGap value '{raw_value}' in setup.e3d; ignoring."
+            )
+            return None
+
+    def _derive_coarse_scaling_factor(
+        self, mindist: float, span_raw: str, coarse_raw: str
+    ) -> Optional[float]:
+        if mindist <= 0.0:
+            return None
+        try:
+            coarse_value = float(coarse_raw)
+        except ValueError:
+            return None
+        span_power = self._span_exponent_value(span_raw)
+        if span_power is None:
+            return None
+        try:
+            denom = mindist * (3 ** span_power)
+        except OverflowError:
+            return None
+        if denom == 0.0:
+            return None
+        return coarse_value / denom
+
+    def _span_exponent_value(self, span_raw: Optional[str]) -> Optional[int]:
+        if span_raw is None:
+            return None
+        try:
+            value = int(float(span_raw))
+        except (TypeError, ValueError):
+            return None
+        if value < 0:
+            return None
+        return value
+
+    def _recompute_coarse_mesh_size(self) -> None:
+        if (
+            self.mindist_value is None
+            or self.span_value is None
+            or self._coarse_scaling_factor is None
+        ):
+            return
+        span_power = self._span_exponent_value(self.span_value)
+        if span_power is None:
+            return
+        try:
+            new_value = self.mindist_value * self._coarse_scaling_factor * (
+                3 ** span_power
+            )
+        except OverflowError:
+            return
+        self.coarse_mesh_size_value = f"{new_value:.6f}"
+        self._emit_info(
+            f"CoarseMeshSize (manual override)={self.coarse_mesh_size_value}"
+        )
 
     def _run_mesh_workflow(self, mindist_value: str) -> None:
         assert self.span_value is not None

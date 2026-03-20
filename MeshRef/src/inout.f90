@@ -2,7 +2,7 @@ module inout_mod
   use var_mod, only: mesh_type, meshes, clear_mesh, rk, mesh_file_count, mesh_files, target_mesh, &
                      extract_template_code, code_to_pattern, match_template_pattern, pattern_to_string, &
                      rotate_patch, templates, template_is_final, element_patch_group, apply_cylindric_transform, &
-                     scaling_factor_TRI_output
+                     scaling_factor_TRI_output, cylindrical_outer_radius
   implicit none
 
 contains
@@ -126,12 +126,31 @@ contains
 
     call clear_mesh(target_mesh)
     call read_mesh_file(filename, target_mesh)
+    call update_cylindrical_radius(target_mesh)
     call load_setup_flags(filename)
   end subroutine load_target_mesh
 
   subroutine release_target_mesh()
     call clear_mesh(target_mesh)
   end subroutine release_target_mesh
+
+  subroutine update_cylindrical_radius(mesh)
+    type(mesh_type), intent(in) :: mesh
+    integer :: ivt
+    real(rk) :: radius, max_radius
+
+    if (.not.allocated(mesh%coor)) then
+       cylindrical_outer_radius = 0.0_rk
+       return
+    end if
+
+    max_radius = 0.0_rk
+    do ivt = 1, size(mesh%coor, 2)
+       radius = sqrt(mesh%coor(1, ivt)**2 + mesh%coor(2, ivt)**2)
+       if (radius > max_radius) max_radius = radius
+    end do
+    cylindrical_outer_radius = max_radius
+  end subroutine update_cylindrical_radius
 
   subroutine read_mesh_file(filename, mesh)
     character(len=*), intent(in) :: filename
@@ -608,12 +627,12 @@ contains
        if (.not.in_section) cycle
        key = adjustl(line)
        if (index(key, 'HexMesher=') > 0) then
-          if (index(key, 'HollowCylinder') > 0) then
+          if (index(key, 'HollowCylinder') > 0 .or. index(key, 'FullCylinder') > 0) then
              apply_cylindric_transform = .true.
-             write(*, '(A)') 'Cylindrical transformation enabled based on setup.e3d (HexMesher=HollowCylinder).'
+             write(*, '(A)') 'Cylindrical transformation enabled based on setup.e3d (HexMesher requests cylindrical mesh).'
           else
              apply_cylindric_transform = .false.
-             write(*, '(A)') 'Box transformation selected (HexMesher setting does not request HollowCylinder).'
+             write(*, '(A)') 'Box transformation selected (HexMesher setting is not cylindrical).'
           end if
           exit
        end if

@@ -5,7 +5,8 @@ module def_mod
                      rotate_patch, determine_template, element_patch_count, release_element_span, &
                      clear_patch_group, append_patch_to_group, clear_mesh, refined_clean_mesh, mesh_type, &
                      release_mesh_levels, reproducibility, refinement_depth, Monitor_threshold, &
-                     apply_cylindric_transform
+                     apply_cylindric_transform, cylindrical_outer_radius
+  use preprocessor_config_mod, only: get_fullcyl_min_radius_percentage, get_fullcyl_max_radius_percentage
   implicit none
   integer, parameter :: max_refinement_depth = 2
   integer, parameter :: face_vertex_map(4, 6) = reshape([ &
@@ -467,6 +468,21 @@ contains
   subroutine fill_up_element(patch, element_coords)
     type(element_patch_type), intent(inout) :: patch
     real(rk), intent(in) :: element_coords(3, 8)
+
+    if (patch%n_vert <= 0) return
+    if (.not.allocated(patch%local_coor)) return
+    if (.not.allocated(patch%global_coor)) return
+
+    call compute_linear_coordinates(patch, element_coords, patch%global_coor)
+    if (.not.apply_cylindric_transform) return
+
+    call apply_cylindrical_blend(patch, element_coords, patch%global_coor)
+  end subroutine fill_up_element
+
+  subroutine compute_linear_coordinates(patch, element_coords, coords_out)
+    type(element_patch_type), intent(in) :: patch
+    real(rk), intent(in) :: element_coords(3, 8)
+    real(rk), intent(inout) :: coords_out(:, :)
     real(rk), parameter :: q8 = 0.125_rk
     real(rk) :: dj(8, 3)
     real(rk) :: xi1, xi2, xi3
@@ -474,15 +490,6 @@ contains
     real(rk) :: xx, yy, zz
     integer :: ii
     real(rk), dimension(3, 8) :: e
-
-    if (apply_cylindric_transform) then
-       call fill_up_element_cylindrical(patch, element_coords)
-       return
-    end if
-
-    if (patch%n_vert <= 0) return
-    if (.not.allocated(patch%local_coor)) return
-    if (.not.allocated(patch%global_coor)) return
 
     e = element_coords
 
@@ -511,12 +518,11 @@ contains
     dj(8,2) = (-e(2,1)+e(2,2)-e(2,3)+e(2,4)+e(2,5)-e(2,6)+e(2,7)-e(2,8))*q8
     dj(8,3) = (-e(3,1)+e(3,2)-e(3,3)+e(3,4)+e(3,5)-e(3,6)+e(3,7)-e(3,8))*q8
 
-    do ii = 1, patch%n_vert
+    do ii = 1, min(patch%n_vert, size(coords_out, 2))
        xi1 = patch%local_coor(1, ii)
        xi2 = patch%local_coor(2, ii)
        xi3 = patch%local_coor(3, ii)
 
-        ! Derivatives of mapping
        djac(1,1) = dj(2,1) + dj(5,1)*xi2 + dj(6,1)*xi3 + dj(8,1)*xi2*xi3
        djac(1,2) = dj(3,1) + dj(5,1)*xi1 + dj(7,1)*xi3 + dj(8,1)*xi1*xi3
        djac(1,3) = dj(4,1) + dj(6,1)*xi1 + dj(7,1)*xi2 + dj(8,1)*xi1*xi2
@@ -531,14 +537,25 @@ contains
        yy = dj(1,2) + dj(2,2)*xi1 + djac(2,2)*xi2 + dj(4,2)*xi3 + dj(6,2)*xi1*xi3
        zz = dj(1,3) + dj(2,3)*xi1 + dj(3,3)*xi2 + djac(3,3)*xi3 + dj(5,3)*xi1*xi2
 
-       patch%global_coor(1, ii) = xx
-       patch%global_coor(2, ii) = yy
-       patch%global_coor(3, ii) = zz
-
+       coords_out(1, ii) = xx
+       coords_out(2, ii) = yy
+       coords_out(3, ii) = zz
     end do
+  end subroutine compute_linear_coordinates
 
-  end subroutine fill_up_element
+  subroutine apply_cylindrical_blend(patch, element_coords, coords_out)
+    type(element_patch_type), intent(in) :: patch
+    real(rk), intent(in) :: element_coords(3, 8)
+    real(rk), intent(inout) :: coords_out(:, :)
+    real(rk), allocatable :: cyl_coords(:,:)
 
+    if (patch%n_vert <= 0) return
+    if (.not.allocated(patch%local_coor)) return
+    allocate(cyl_coords(3, patch%n_vert))
+    call compute_cylindrical_coordinates(patch, element_coords, cyl_coords)
+    call blend_coordinate_sets(coords_out, cyl_coords)
+    deallocate(cyl_coords)
+  end subroutine apply_cylindrical_blend
   subroutine mark_elements_by_threshold(mesh, level, threshold_value)
     type(mesh_type), intent(inout) :: mesh
     integer, intent(in) :: level
@@ -613,9 +630,10 @@ contains
     deallocate(counts)
   end subroutine report_refinement_distribution
 
-  subroutine fill_up_element_cylindrical(patch, element_coords)
-    type(element_patch_type), intent(inout) :: patch
+  subroutine compute_cylindrical_coordinates(patch, element_coords, coords_out)
+    type(element_patch_type), intent(in) :: patch
     real(rk), intent(in) :: element_coords(3, 8)
+    real(rk), intent(inout) :: coords_out(:, :)
     real(rk), parameter :: q8 = 0.125_rk
     real(rk) :: dj(8, 3)
     real(rk) :: xi1, xi2, xi3
@@ -629,7 +647,6 @@ contains
 
     if (patch%n_vert <= 0) return
     if (.not.allocated(patch%local_coor)) return
-    if (.not.allocated(patch%global_coor)) return
 
     do ii = 1, 8
        ecyl(1, ii) = sqrt(element_coords(1, ii)**2 + element_coords(2, ii)**2)
@@ -669,7 +686,7 @@ contains
     dj(8,2)=(-ecyl(2,1)+ecyl(2,2)-ecyl(2,3)+ecyl(2,4)+ecyl(2,5)-ecyl(2,6)+ecyl(2,7)-ecyl(2,8))*q8
     dj(8,3)=(-ecyl(3,1)+ecyl(3,2)-ecyl(3,3)+ecyl(3,4)+ecyl(3,5)-ecyl(3,6)+ecyl(3,7)-ecyl(3,8))*q8
 
-    do ii = 1, patch%n_vert
+    do ii = 1, min(patch%n_vert, size(coords_out, 2))
        xi1 = patch%local_coor(1, ii)
        xi2 = patch%local_coor(2, ii)
        xi3 = patch%local_coor(3, ii)
@@ -691,11 +708,58 @@ contains
        xx = rr * cos(tt)
        yy = rr * sin(tt)
 
-       patch%global_coor(1, ii) = xx
-       patch%global_coor(2, ii) = yy
-       patch%global_coor(3, ii) = zz
+        coords_out(1, ii) = xx
+        coords_out(2, ii) = yy
+        coords_out(3, ii) = zz
     end do
-  end subroutine fill_up_element_cylindrical
+  end subroutine compute_cylindrical_coordinates
+
+  subroutine blend_coordinate_sets(box_coords, cyl_coords)
+    real(rk), intent(inout) :: box_coords(:, :)
+    real(rk), intent(in) :: cyl_coords(:, :)
+    real(rk) :: outer_radius, diameter, low_thresh, high_thresh, radius, alpha
+    real(rk) :: pct_min, pct_max
+    integer :: ii, max_nodes
+
+    max_nodes = min(size(box_coords, 2), size(cyl_coords, 2))
+    if (max_nodes <= 0) return
+
+    outer_radius = cylindrical_outer_radius
+    if (outer_radius <= 0.0_rk) then
+       outer_radius = 0.0_rk
+       do ii = 1, max_nodes
+          radius = sqrt(box_coords(1, ii)**2 + box_coords(2, ii)**2)
+          if (radius > outer_radius) outer_radius = radius
+       end do
+    end if
+
+    diameter = 2.0_rk * outer_radius
+    if (diameter <= 0.0_rk) then
+       do ii = 1, max_nodes
+          box_coords(:, ii) = cyl_coords(:, ii)
+       end do
+       return
+    end if
+
+    pct_min = max(0.0_rk, real(get_fullcyl_min_radius_percentage(), rk))
+    pct_max = max(0.0_rk, real(get_fullcyl_max_radius_percentage(), rk))
+    if (pct_max <= pct_min) pct_max = pct_min + 1.0_rk
+
+    low_thresh = 0.01_rk * pct_min * diameter
+    high_thresh = 0.01_rk * pct_max * diameter
+
+    do ii = 1, max_nodes
+       radius = sqrt(box_coords(1, ii)**2 + box_coords(2, ii)**2)
+       if (radius <= low_thresh) then
+          alpha = 0.0_rk
+       else if (radius >= high_thresh) then
+          alpha = 1.0_rk
+       else
+          alpha = (radius - low_thresh) / (high_thresh - low_thresh)
+       end if
+       box_coords(:, ii) = alpha * cyl_coords(:, ii) + (1.0_rk - alpha) * box_coords(:, ii)
+    end do
+  end subroutine blend_coordinate_sets
 
   subroutine write_template_usage(usage)
     integer, intent(in) :: usage(:)

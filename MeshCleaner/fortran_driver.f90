@@ -9,6 +9,11 @@ program fortran_cgal_demo
         ProcessParameters, initialize_process_parameters, load_process_parameters, log_process_inflows
     implicit none
 
+    type :: WallFieldData
+        character(len=64) :: name = ""
+        integer(c_int), allocatable :: values(:)
+    end type WallFieldData
+
     interface
         function cgal_load_off(path) bind(C, name="cgal_load_off") result(handle)
             import :: c_ptr, c_char
@@ -138,6 +143,7 @@ program fortran_cgal_demo
     integer(c_int), allocatable :: filtered_knpr(:)
     integer(c_int), allocatable :: filtered_monitor(:)
     integer(c_int), allocatable :: node_inflow_ids(:)
+    type(WallFieldData), allocatable :: wall_fields(:)
     integer(c_int), allocatable :: filtered_kadj(:, :)
     real(c_double), allocatable :: filtered_volumes(:)
     integer :: filtered_nel, filtered_nvt
@@ -410,19 +416,22 @@ program fortran_cgal_demo
         allocate(node_inflow_ids(filtered_nvt))
         node_inflow_ids = 0_c_int
         if (mesh_config%loaded) then
+            call clear_wall_fields(wall_fields)
             select case (trim(mesh_config%mesh_type))
-            case ("HollowCylinder")
+            case ("HollowCylinder","FullCylinder")
                 call classify_hollowcylinder_boundaries(mesh_config, process_params, filtered_coords, filtered_kvert, &
                     filtered_knpr, boundary_faces, hc_boundary)
                 hc_summary_ready = .true.
-                call write_hc_parametrizations(mesh_output_folder, hc_boundary, meshdir_files, meshdir_file_count)
+                call write_hc_parametrizations(mesh_output_folder, mesh_config, hc_boundary, meshdir_files, &
+                    meshdir_file_count, filtered_nvt, wall_fields)
                 call populate_hc_inflow_field(hc_boundary, node_inflow_ids)
             case ("Box")
                 call classify_box_boundaries(mesh_config, process_params, filtered_coords, filtered_kvert, filtered_knpr, &
                     boundary_faces, &
                     box_boundary)
                 box_summary_ready = .true.
-                call write_box_parametrizations(mesh_output_folder, box_boundary, meshdir_files, meshdir_file_count)
+                call write_box_parametrizations(mesh_output_folder, mesh_config, box_boundary, meshdir_files, &
+                    meshdir_file_count, filtered_nvt, wall_fields)
                 call populate_box_inflow_field(box_boundary, node_inflow_ids)
             end select
         end if
@@ -432,11 +441,22 @@ program fortran_cgal_demo
                               hex_nve, hex_nee, hex_nae, 0.1_c_double * filtered_coords, filtered_kvert, filtered_knpr)
         call append_file_record(meshdir_files, meshdir_file_count, "Filtered.tri")
         if (monitor_data_available) then
-            call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr, inflow_ids=node_inflow_ids, &
-                monitor_values=filtered_monitor)
+            if (allocated(wall_fields)) then
+                call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr, inflow_ids=node_inflow_ids, &
+                    monitor_values=filtered_monitor, wall_fields=wall_fields)
+            else
+                call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr, inflow_ids=node_inflow_ids, &
+                    monitor_values=filtered_monitor)
+            end if
         else
-            call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr, inflow_ids=node_inflow_ids)
+            if (allocated(wall_fields)) then
+                call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr, inflow_ids=node_inflow_ids, &
+                    wall_fields=wall_fields)
+            else
+                call write_vtu(filtered_vtu_file, filtered_coords, filtered_kvert, filtered_knpr, inflow_ids=node_inflow_ids)
+            end if
         end if
+        call clear_wall_fields(wall_fields)
         call write_project_file(mesh_output_folder, meshdir_files, meshdir_file_count)
     end if
 
@@ -713,23 +733,67 @@ contains
         end if
     end subroutine report_box_summary
 
-    subroutine write_hc_parametrizations(folder, classification, recorded_files, record_count)
+    subroutine write_hc_parametrizations(folder, mesh_config, classification, recorded_files, record_count, &
+        total_nodes, wall_fields)
         character(len=*), intent(in) :: folder
+        type(MeshConfig), intent(in) :: mesh_config
         type(HollowCylinderBoundaryClassification), intent(in) :: classification
         character(len=512), allocatable, intent(inout) :: recorded_files(:)
         integer, intent(inout) :: record_count
+        integer, intent(in) :: total_nodes
+        type(WallFieldData), allocatable, intent(inout) :: wall_fields(:)
         integer :: inflow_idx
         character(len=64) :: inflow_filename
         character(len=32) :: inflow_label
+        real(c_double) :: z_max_offset
+        logical :: have_z_offset
+        logical :: is_full_cyl
 
+        is_full_cyl = (trim(mesh_config%mesh_type) == "FullCylinder")
         call write_par_file(folder, "cyl_out.par", classification%cyl_outer_nodes, "Wall", recorded_files, record_count)
-        call write_par_file(folder, "cyl_in.par", classification%cyl_inner_nodes, "Wall", recorded_files, record_count)
+        if (allocated(classification%cyl_outer_nodes)) then
+            if (size(classification%cyl_outer_nodes) > 0) &
+                call append_wall_field(wall_fields, total_nodes, "Wall_cyl_out", classification%cyl_outer_nodes)
+        end if
+        if (.not. is_full_cyl) then
+            call write_par_file(folder, "cyl_in.par", classification%cyl_inner_nodes, "Wall", recorded_files, record_count)
+            if (allocated(classification%cyl_inner_nodes)) then
+                if (size(classification%cyl_inner_nodes) > 0) &
+                    call append_wall_field(wall_fields, total_nodes, "Wall_cyl_in", classification%cyl_inner_nodes)
+            end if
+        end if
         call write_par_file(folder, "z-.par", classification%axial_min_nodes, "Wall", recorded_files, record_count)
-        call write_par_file(folder, "z+.par", classification%axial_max_nodes, "Outflow", recorded_files, record_count)
+        if (allocated(classification%axial_min_nodes)) then
+            if (size(classification%axial_min_nodes) > 0) &
+                call append_wall_field(wall_fields, total_nodes, "Wall_z-", classification%axial_min_nodes)
+        end if
+        have_z_offset = .false.
+        if (mesh_config%cylinder%has_axial_start .and. mesh_config%cylinder%has_barrel_length) then
+            z_max_offset = -1.0_c_double * (mesh_config%cylinder%axial_start + mesh_config%cylinder%barrel_length) * 0.1_c_double
+            have_z_offset = .true.
+        end if
+        if (have_z_offset) then
+            call write_par_file(folder, "z+.par", classification%axial_max_nodes, "Outflow", recorded_files, record_count, &
+                offset_value=z_max_offset)
+        else
+            call write_par_file(folder, "z+.par", classification%axial_max_nodes, "Outflow", recorded_files, record_count)
+        end if
+        if (allocated(classification%axial_max_nodes)) then
+            if (size(classification%axial_max_nodes) > 0) &
+                call append_wall_field(wall_fields, total_nodes, "Wall_z+", classification%axial_max_nodes)
+        end if
         call write_par_file(folder, "innerwall.par", classification%inner_wall_nodes, "Wall", recorded_files, record_count)
+        if (allocated(classification%inner_wall_nodes)) then
+            if (size(classification%inner_wall_nodes) > 0) &
+                call append_wall_field(wall_fields, total_nodes, "Wall_innerwall", classification%inner_wall_nodes)
+        end if
         if (allocated(classification%inflow_groups)) then
             do inflow_idx = 1, size(classification%inflow_groups)
-                write(inflow_filename,'("hc_inflow_",I0,".par")') classification%inflow_groups(inflow_idx)%inflow_index
+                if (is_full_cyl) then
+                    write(inflow_filename,'("fc_inflow_",I0,".par")') classification%inflow_groups(inflow_idx)%inflow_index
+                else
+                    write(inflow_filename,'("hc_inflow_",I0,".par")') classification%inflow_groups(inflow_idx)%inflow_index
+                end if
                 write(inflow_label,'("Inflow-",I0)') classification%inflow_groups(inflow_idx)%inflow_index
                 call write_par_file(folder, trim(inflow_filename), classification%inflow_groups(inflow_idx)%nodes, &
                     trim(inflow_label), recorded_files, record_count)
@@ -737,22 +801,67 @@ contains
         end if
     end subroutine write_hc_parametrizations
 
-    subroutine write_box_parametrizations(folder, classification, recorded_files, record_count)
+    subroutine write_box_parametrizations(folder, mesh_config, classification, recorded_files, record_count, &
+        total_nodes, wall_fields)
         character(len=*), intent(in) :: folder
+        type(MeshConfig), intent(in) :: mesh_config
         type(BoxBoundaryClassification), intent(in) :: classification
         character(len=512), allocatable, intent(inout) :: recorded_files(:)
         integer, intent(inout) :: record_count
+        integer, intent(in) :: total_nodes
+        type(WallFieldData), allocatable, intent(inout) :: wall_fields(:)
         integer :: inflow_idx
         character(len=64) :: inflow_filename
         character(len=32) :: inflow_label
+        real(c_double) :: z_max_offset
+        logical :: have_z_offset
 
         call write_par_file(folder, "x-.par", classification%x_min_nodes, "Wall", recorded_files, record_count)
         call write_par_file(folder, "x+.par", classification%x_max_nodes, "Wall", recorded_files, record_count)
         call write_par_file(folder, "y-.par", classification%y_min_nodes, "Wall", recorded_files, record_count)
         call write_par_file(folder, "y+.par", classification%y_max_nodes, "Wall", recorded_files, record_count)
         call write_par_file(folder, "z-.par", classification%z_min_nodes, "Wall", recorded_files, record_count)
-        call write_par_file(folder, "z+.par", classification%z_max_nodes, "Outflow", recorded_files, record_count)
+        if (allocated(classification%x_min_nodes)) then
+            if (size(classification%x_min_nodes) > 0) &
+                call append_wall_field(wall_fields, total_nodes, "Wall_x-", classification%x_min_nodes)
+        end if
+        if (allocated(classification%x_max_nodes)) then
+            if (size(classification%x_max_nodes) > 0) &
+                call append_wall_field(wall_fields, total_nodes, "Wall_x+", classification%x_max_nodes)
+        end if
+        if (allocated(classification%y_min_nodes)) then
+            if (size(classification%y_min_nodes) > 0) &
+                call append_wall_field(wall_fields, total_nodes, "Wall_y-", classification%y_min_nodes)
+        end if
+        if (allocated(classification%y_max_nodes)) then
+            if (size(classification%y_max_nodes) > 0) &
+                call append_wall_field(wall_fields, total_nodes, "Wall_y+", classification%y_max_nodes)
+        end if
+        if (allocated(classification%z_min_nodes)) then
+            if (size(classification%z_min_nodes) > 0) &
+                call append_wall_field(wall_fields, total_nodes, "Wall_z-", classification%z_min_nodes)
+        end if
+        have_z_offset = .false.
+        if (mesh_config%box%has_geometry_start .and. mesh_config%box%has_geometry_length) then
+            z_max_offset = -1.0_c_double * &
+                (mesh_config%box%geometry_start(3) + mesh_config%box%geometry_length(3)) * 0.1_c_double
+            have_z_offset = .true.
+        end if
+        if (have_z_offset) then
+            call write_par_file(folder, "z+.par", classification%z_max_nodes, "Outflow", recorded_files, record_count, &
+                offset_value=z_max_offset)
+        else
+            call write_par_file(folder, "z+.par", classification%z_max_nodes, "Outflow", recorded_files, record_count)
+        end if
         call write_par_file(folder, "innerwall.par", classification%inner_wall_nodes, "Wall", recorded_files, record_count)
+        if (allocated(classification%z_max_nodes)) then
+            if (size(classification%z_max_nodes) > 0) &
+                call append_wall_field(wall_fields, total_nodes, "Wall_z+", classification%z_max_nodes)
+        end if
+        if (allocated(classification%inner_wall_nodes)) then
+            if (size(classification%inner_wall_nodes) > 0) &
+                call append_wall_field(wall_fields, total_nodes, "Wall_innerwall", classification%inner_wall_nodes)
+        end if
         if (allocated(classification%inflow_groups)) then
             do inflow_idx = 1, size(classification%inflow_groups)
                 write(inflow_filename,'("inflow_",I0,".par")') classification%inflow_groups(inflow_idx)%inflow_index
@@ -815,15 +924,17 @@ contains
         end do
     end subroutine stamp_nodes_with_value
 
-    subroutine write_par_file(folder, filename, nodes, keyword, recorded_files, record_count)
+    subroutine write_par_file(folder, filename, nodes, keyword, recorded_files, record_count, offset_value)
         character(len=*), intent(in) :: folder, filename
         integer, allocatable, intent(in) :: nodes(:)
         character(len=*), intent(in), optional :: keyword
         character(len=512), allocatable, intent(inout), optional :: recorded_files(:)
         integer, intent(inout), optional :: record_count
+        real(c_double), intent(in), optional :: offset_value
         integer :: unit, count, i
         character(len=512) :: filepath
         character(len=32) :: label
+        character(len=64) :: header_line
 
         call ensure_directory_exists(folder)
         call build_config_path(folder, filename, filepath)
@@ -836,7 +947,12 @@ contains
         label = "Wall"
         if (present(keyword)) label = trim(keyword)
         write(unit,'(I0,1X,A)') count, trim(label)
-        write(unit,'(A)') '" "'
+        if (present(offset_value)) then
+            write(header_line,'("4 0.0 0.0 1.0 ",F16.6)') offset_value
+            write(unit,'(A)') '"'//trim(adjustl(header_line))//'"'
+        else
+            write(unit,'(A)') '"1 0.0"'
+        end if
         if (count > 0) then
             do i = 1, count
                 write(unit,'(I0)') nodes(i)
@@ -847,6 +963,55 @@ contains
         call append_file_record(recorded_files, record_count, trim(filename))
         end if
     end subroutine write_par_file
+
+    subroutine append_wall_field(fields, total_nodes, field_label, nodes)
+        type(WallFieldData), allocatable, intent(inout) :: fields(:)
+        integer, intent(in) :: total_nodes
+        character(len=*), intent(in) :: field_label
+        integer, intent(in) :: nodes(:)
+        type(WallFieldData), allocatable :: temp(:)
+        integer :: old_count, idx, node_idx, node_id
+
+        if (total_nodes <= 0) return
+        if (size(nodes) <= 0) return
+
+        old_count = 0
+        if (allocated(fields)) then
+            old_count = size(fields)
+            if (old_count > 0) then
+                allocate(temp(old_count))
+                temp = fields
+            end if
+            call clear_wall_fields(fields)
+            allocate(fields(old_count + 1))
+            if (old_count > 0) then
+                fields(1:old_count) = temp
+                deallocate(temp)
+            end if
+        else
+            allocate(fields(1))
+        end if
+        idx = old_count + 1
+        fields(idx)%name = trim(field_label)
+        if (allocated(fields(idx)%values)) deallocate(fields(idx)%values)
+        allocate(fields(idx)%values(total_nodes))
+        fields(idx)%values = 0_c_int
+        do node_idx = 1, size(nodes)
+            node_id = nodes(node_idx)
+            if (node_id >= 1 .and. node_id <= total_nodes) fields(idx)%values(node_id) = 1_c_int
+        end do
+    end subroutine append_wall_field
+
+    subroutine clear_wall_fields(fields)
+        type(WallFieldData), allocatable, intent(inout) :: fields(:)
+        integer :: idx
+        if (.not.allocated(fields)) return
+        do idx = 1, size(fields)
+            if (allocated(fields(idx)%values)) deallocate(fields(idx)%values)
+            fields(idx)%name = ""
+        end do
+        deallocate(fields)
+    end subroutine clear_wall_fields
 
     subroutine compute_monitor_histogram(monitor_values, histogram)
         integer(c_int), intent(in) :: monitor_values(:)
@@ -1349,16 +1514,18 @@ contains
         close(unit)
     end subroutine write_single_tri
 
-    subroutine write_vtu(filename, coords, kvert, knpr, inflow_ids, monitor_values)
+    subroutine write_vtu(filename, coords, kvert, knpr, inflow_ids, monitor_values, wall_fields)
         character(len=*), intent(in) :: filename
         real(c_double), intent(in) :: coords(:, :)
         integer(c_int), intent(in) :: kvert(:, :)
         integer(c_int), intent(in) :: knpr(:)
         integer(c_int), intent(in), optional :: inflow_ids(:)
         integer(c_int), intent(in), optional :: monitor_values(:)
+        type(WallFieldData), intent(in), optional :: wall_fields(:)
 
         integer :: unit, nvt, nel, nve
         integer :: i, j
+        integer :: field_idx
         integer :: offset
 
         nvt = size(coords, 2)
@@ -1380,6 +1547,16 @@ contains
             write(unit, '(A)') '        <DataArray type="Int32" Name="InflowId" format="ascii">'
             write(unit, '(6(1X,I8))') (int(inflow_ids(i), kind=4), i = 1, nvt)
             write(unit, '(A)') '        </DataArray>'
+        end if
+        if (present(wall_fields)) then
+            do field_idx = 1, size(wall_fields)
+                if (.not.allocated(wall_fields(field_idx)%values)) cycle
+                if (size(wall_fields(field_idx)%values) /= nvt) cycle
+                if (len_trim(wall_fields(field_idx)%name) == 0) cycle
+                write(unit, '(A)') '        <DataArray type="Int32" Name="'//trim(wall_fields(field_idx)%name)//'" format="ascii">'
+                write(unit, '(6(1X,I8))') (int(wall_fields(field_idx)%values(i), kind=4), i = 1, nvt)
+                write(unit, '(A)') '        </DataArray>'
+            end do
         end if
         write(unit, '(A)') '      </PointData>'
 

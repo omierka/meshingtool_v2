@@ -18,11 +18,13 @@ module setupe3dfile_reader
         real(c_double) :: barrel_length = 0.0_c_double
         real(c_double) :: axial_start = 0.0_c_double
         real(c_double) :: spacing(3) = 0.0_c_double
+        integer :: periodicity = 4
         logical :: has_barrel_diameter = .false.
         logical :: has_inner_diameter = .false.
         logical :: has_barrel_length = .false.
         logical :: has_axial_start = .false.
         logical :: has_spacing = .false.
+        logical :: has_periodicity = .false.
     end type HollowCylinderMeshConfig
 
     type, public :: MeshConfig
@@ -130,7 +132,7 @@ contains
                 write(*,'(A,3(1X,ES12.5))') "  geometryLength:", config%box%geometry_length
             if (config%box%has_spacing) &
                 write(*,'(A,3(1X,ES12.5))') "  sEl(x,y,z):", config%box%spacing
-        case ("hollowcylinder")
+        case ("hollowcylinder", "fullcylinder")
             if (config%cylinder%has_barrel_diameter) &
                 write(*,'(A,1X,ES12.5)') "  BarrelDiameter:", config%cylinder%barrel_diameter
             if (config%cylinder%has_inner_diameter) &
@@ -141,6 +143,13 @@ contains
                 write(*,'(A,1X,ES12.5)') "  AxialStartPos :", config%cylinder%axial_start
             if (config%cylinder%has_spacing) &
                 write(*,'(A,3(1X,ES12.5))') "  sEl(tan,rad,ax):", config%cylinder%spacing
+            if (trim(type_token) == "fullcylinder") then
+                if (config%cylinder%has_periodicity) then
+                    write(*,'(A,1X,I0)') "  FullCylinderPeriodicity:", config%cylinder%periodicity
+                else
+                    write(*,'(A)') "  FullCylinderPeriodicity: (default=4)"
+                end if
+            end if
         end select
     end subroutine log_mesh_config
 
@@ -167,6 +176,7 @@ contains
         character(len=*), intent(in) :: key_id, value
         type(MeshConfig), intent(inout) :: config
         logical :: parsed
+        integer :: parsed_int
 
         assign_simulation_key = .false.
         select case (key_id)
@@ -207,6 +217,17 @@ contains
             parsed = try_parse_real(value, config%cylinder%spacing(3))
             if (parsed) then
                 config%cylinder%has_spacing = .true.
+                assign_simulation_key = .true.
+            end if
+        case ("fullcylinderperiodicity")
+            parsed = try_parse_integer(value, parsed_int)
+            if (parsed) then
+                if (parsed_int > 0) then
+                    config%cylinder%periodicity = parsed_int
+                else
+                    config%cylinder%periodicity = 4
+                end if
+                config%cylinder%has_periodicity = .true.
                 assign_simulation_key = .true.
             end if
         case default
@@ -276,6 +297,8 @@ contains
             config%mesh_type = "Box"
         case ("hollowcylinder")
             config%mesh_type = "HollowCylinder"
+        case ("fullcylinder")
+            config%mesh_type = "FullCylinder"
         case default
             config%mesh_type = trim(raw_value)
         end select

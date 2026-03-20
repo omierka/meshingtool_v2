@@ -176,6 +176,7 @@ contains
 
         real(c_double) :: outer_radius, inner_radius, axial_min, axial_max
         real(c_double) :: tolerance_factor
+        character(len=64) :: mesh_type
         logical :: have_outer, have_inner, have_axial_min, have_axial_max
         integer :: face_count
         integer :: face_idx
@@ -204,9 +205,11 @@ contains
 
         if (classification%total_boundary_nodes == 0) return
 
+        mesh_type = config%mesh_type
         have_outer = config%cylinder%has_barrel_diameter
         if (have_outer) outer_radius = 0.5_c_double * config%cylinder%barrel_diameter
         have_inner = config%cylinder%has_inner_diameter
+        if (trim(mesh_type) == "FullCylinder") have_inner = .false.
         if (have_inner) inner_radius = 0.5_c_double * config%cylinder%inner_diameter
         have_axial_min = config%cylinder%has_axial_start
         if (have_axial_min) axial_min = config%cylinder%axial_start

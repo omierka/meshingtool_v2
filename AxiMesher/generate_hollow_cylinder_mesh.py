@@ -95,7 +95,21 @@ class BoxMeshInput:
     scale_z: float
 
 
-MeshInput = Union[AnnularMeshInput, BoxMeshInput]
+@dataclass
+class FullCylinderMeshInput:
+    outer_diameter: float
+    length: float
+    start_z: float
+    periodicity: int
+    n_inner: int | None
+    n_outer: int | None
+    n_z: int | None
+    scale_t: float
+    scale_r: float
+    scale_z: float
+
+
+MeshInput = Union[AnnularMeshInput, BoxMeshInput, FullCylinderMeshInput]
 
 
 def read_parameters(
@@ -124,6 +138,31 @@ def read_parameters(
         scale_z = _get_float_with_default(sim, "sEl_z", default=1.0)
         return BoxMeshInput(
             start, lengths, n_x, n_y, n_z, scale_x, scale_y, scale_z
+        )
+    if hex_mesher == "fullcylinder":
+        outer_diameter = float(geom["BarrelDiameter"])
+        length = float(geom["BarrelLength"])
+        start_z = float(geom.get("AxialStartPosition", 0.0))
+        periodicity = _get_optional_int(sim, "FullCylinderPeriodicity")
+        if periodicity is None or periodicity <= 0:
+            periodicity = 4
+        n_inner = _get_optional_int(sim, "nEl_Tangential")
+        n_outer = _get_optional_int(sim, "nEl_Radial")
+        n_z = _get_optional_int(sim, "nEl_Axial")
+        scale_t = _get_float_with_default(sim, "sEl_Tangential", default=1.0)
+        scale_r = _get_float_with_default(sim, "sEl_Radial", default=1.0)
+        scale_z = _get_float_with_default(sim, "sEl_Axial", default=1.0)
+        return FullCylinderMeshInput(
+            outer_diameter,
+            length,
+            start_z,
+            periodicity,
+            n_inner,
+            n_outer,
+            n_z,
+            scale_t,
+            scale_r,
+            scale_z,
         )
 
     outer_diameter = float(geom["BarrelDiameter"])
@@ -414,8 +453,259 @@ def build_annular_connectivity(
                     bottom_left_up,
                     bottom_right_up,
                     top_right_up,
-                    top_left_up,
+                top_left_up,
+            )
+
+
+def resolve_full_cylinder_resolutions(
+    outer_diameter: float,
+    length: float,
+    periodicity: int,
+    n_inner: int | None,
+    n_outer: int | None,
+    n_z: int | None,
+    grid_size: float | None,
+    scale_t: float,
+    scale_r: float,
+    scale_z: float,
+) -> Tuple[int, int, int]:
+    if outer_diameter <= 0.0:
+        raise ValueError("BarrelDiameter must be positive for FullCylinder.")
+    if length <= 0.0:
+        raise ValueError("BarrelLength must be positive for FullCylinder.")
+    if periodicity <= 0:
+        raise ValueError("FullCylinderPeriodicity must be positive.")
+    for label, scale in (
+        ("sEl_Tangential", scale_t),
+        ("sEl_Radial", scale_r),
+        ("sEl_Axial", scale_z),
+    ):
+        if scale <= 0.0:
+            raise ValueError(f"{label} must be positive.")
+    if grid_size is None:
+        if n_inner is None or n_outer is None or n_z is None:
+            raise ValueError(
+                "nEl_Tangential, nEl_Radial, and nEl_Axial must be provided "
+                "for FullCylinder meshes when --grid-size is not specified."
+            )
+        n_inner_final = n_inner
+        n_outer_final = n_outer
+        n_z_final = n_z
+    else:
+        if grid_size <= 0.0:
+            raise ValueError("--grid-size must be a positive number.")
+        outer_radius = outer_diameter / 2.0
+        circumference = 2.0 * math.pi * outer_radius
+        tangential_target = _estimate_elements(
+            circumference, grid_size * scale_t, minimum=2 * periodicity
+        )
+        if n_inner is None:
+            n_inner_final = max(
+                1, math.ceil(tangential_target / (2 * periodicity))
+            )
+        else:
+            n_inner_final = n_inner
+        radial_target_total = _estimate_elements(
+            outer_radius, grid_size * scale_r, minimum=1
+        )
+        if n_outer is None:
+            n_outer_final = max(1, radial_target_total - n_inner_final)
+        else:
+            n_outer_final = n_outer
+        if n_z is None:
+            n_z_final = _estimate_elements(
+                length, grid_size * scale_z, minimum=1
+            )
+        else:
+            n_z_final = n_z
+    for label, value in (
+        ("nEl_Tangential", n_inner_final),
+        ("nEl_Radial", n_outer_final),
+        ("nEl_Axial", n_z_final),
+    ):
+        if value <= 0:
+            raise ValueError(f"{label} must be positive for FullCylinder.")
+    return n_inner_final, n_outer_final, n_z_final
+
+
+def build_full_cylinder_coordinates(
+    outer_diameter: float,
+    length: float,
+    start_z: float,
+    periodicity: int,
+    n_inner: int,
+    n_outer: int,
+    n_z: int,
+) -> Tuple[List[Tuple[float, float, float]], List[int]]:
+    if n_inner <= 0 or n_outer <= 0 or n_z <= 0:
+        raise ValueError("FullCylinder element counts must be positive.")
+    if periodicity <= 0:
+        raise ValueError("FullCylinderPeriodicity must be positive.")
+    outer_radius = outer_diameter / 2.0
+    n_z_nodes = n_z + 1
+    coords: List[Tuple[float, float, float]] = []
+    knpr: List[int] = []
+
+    inner_fraction = n_inner / (n_inner + n_outer)
+    inner_radius_span = outer_radius * inner_fraction
+    outer_radius_span = max(0.0, outer_radius - inner_radius_span)
+
+    def add_node(x: float, y: float, z: float, is_boundary: bool) -> None:
+        coords.append((x, y, z))
+        knpr.append(1 if is_boundary else 0)
+
+    if n_z == 0:
+        z_levels = [start_z]
+    else:
+        z_levels = [
+            start_z + length * k / n_z for k in range(n_z_nodes)
+        ]
+
+    for k, z in enumerate(z_levels):
+        at_axial_boundary = (k == 0) or (k == n_z_nodes - 1)
+        add_node(0.0, 0.0, z, at_axial_boundary)
+
+        for j in range(1, n_inner + 1):
+            ni = 2 * periodicity * j
+            radius = inner_radius_span * j / n_inner
+            for i in range(ni):
+                theta = 2.0 * math.pi * i / ni
+                x = radius * math.cos(theta)
+                y = radius * math.sin(theta)
+                is_boundary = at_axial_boundary or (
+                    n_outer == 0 and j == n_inner
                 )
+                add_node(x, y, z, is_boundary)
+
+        if n_outer <= 0:
+            continue
+        outer_nodes = 2 * periodicity * n_inner
+        for j in range(1, n_outer + 1):
+            radius = inner_radius_span
+            radius += outer_radius_span * j / n_outer
+            for i in range(outer_nodes):
+                theta = 2.0 * math.pi * i / outer_nodes
+                x = radius * math.cos(theta)
+                y = radius * math.sin(theta)
+                is_boundary = at_axial_boundary or (j == n_outer)
+                add_node(x, y, z, is_boundary)
+
+    return coords, knpr
+
+
+def build_full_cylinder_connectivity(
+    periodicity: int, n_inner: int, n_outer: int, n_z: int
+) -> Iterable[Tuple[int, int, int, int, int, int, int, int]]:
+    if n_inner <= 0 or n_outer <= 0 or n_z <= 0:
+        raise ValueError("FullCylinder element counts must be positive.")
+    if periodicity <= 0:
+        raise ValueError("FullCylinderPeriodicity must be positive.")
+    level_nodes = (
+        periodicity * (n_inner * n_inner + n_inner)
+        + n_outer * 2 * n_inner * periodicity
+        + 1
+    )
+
+    for k in range(1, n_z + 1):
+        mm1 = (k - 1) * level_nodes
+        mm2 = k * level_nodes
+        kk = periodicity * 2 + 1
+        ll = 1
+
+        for j in range(1, periodicity):
+            i = 2 * (j - 1) + 1
+            yield (
+                mm1 + i + 1,
+                mm1 + i + 2,
+                mm1 + i + 3,
+                mm1 + 1,
+                mm2 + i + 1,
+                mm2 + i + 2,
+                mm2 + i + 3,
+                mm2 + 1,
+            )
+        i = 2 * (periodicity - 1) + 1
+        yield (
+            mm1 + i + 1,
+            mm1 + i + 2,
+            mm1 + 2,
+            mm1 + 1,
+            mm2 + i + 1,
+            mm2 + i + 2,
+            mm2 + 2,
+            mm2 + 1,
+        )
+
+        for j in range(2, n_inner + 1):
+            for i in range(1, 2 * periodicity * j + 1):
+                mod_value = i % (2 * j)
+                if mod_value != j and mod_value != j + 1:
+                    kk += 1
+                    ll += 1
+                    if i < 2 * periodicity * j:
+                        yield (
+                            mm1 + kk,
+                            mm1 + kk + 1,
+                            mm1 + ll + 1,
+                            mm1 + ll,
+                            mm2 + kk,
+                            mm2 + kk + 1,
+                            mm2 + ll + 1,
+                            mm2 + ll,
+                        )
+                    else:
+                        yield (
+                            mm1 + kk,
+                            mm1 + ll + 1,
+                            mm1 + ll + 1 - 2 * periodicity * (j - 1),
+                            mm1 + ll,
+                            mm2 + kk,
+                            mm2 + ll + 1,
+                            mm2 + ll + 1 - 2 * periodicity * (j - 1),
+                            mm2 + ll,
+                        )
+                else:
+                    if mod_value == j:
+                        kk += 1
+                        yield (
+                            mm1 + kk,
+                            mm1 + kk + 1,
+                            mm1 + kk + 2,
+                            mm1 + ll + 1,
+                            mm2 + kk,
+                            mm2 + kk + 1,
+                            mm2 + kk + 2,
+                            mm2 + ll + 1,
+                        )
+                    else:
+                        kk += 1
+
+        for j in range(1, n_outer + 1):
+            for _ in range(1, 2 * periodicity * n_inner):
+                kk += 1
+                ll += 1
+                yield (
+                    mm1 + kk,
+                    mm1 + kk + 1,
+                    mm1 + ll + 1,
+                    mm1 + ll,
+                    mm2 + kk,
+                    mm2 + kk + 1,
+                    mm2 + ll + 1,
+                    mm2 + ll,
+                )
+            kk += 1
+            ll += 1
+            yield (
+                mm1 + kk,
+                mm1 + ll + 1,
+                mm1 + ll + 1 - 2 * periodicity * n_inner,
+                mm1 + ll,
+                mm2 + kk,
+                mm2 + ll + 1,
+                mm2 + ll + 1 - 2 * periodicity * n_inner,
+                mm2 + ll,
+            )
 
 
 def build_box_coordinates(
@@ -570,6 +860,39 @@ def main() -> None:
                 mesh_input.start, mesh_input.lengths, n_x, n_y, n_z
             )
             cells = build_box_connectivity(n_x, n_y, n_z)
+        elif isinstance(mesh_input, FullCylinderMeshInput):
+            n_inner, n_outer, n_z = resolve_full_cylinder_resolutions(
+                mesh_input.outer_diameter,
+                mesh_input.length,
+                mesh_input.periodicity,
+                mesh_input.n_inner,
+                mesh_input.n_outer,
+                mesh_input.n_z,
+                args.grid_size,
+                mesh_input.scale_t,
+                mesh_input.scale_r,
+                mesh_input.scale_z,
+            )
+            total_elements = n_z * mesh_input.periodicity * (
+                n_inner * n_inner + 2 * n_inner * n_outer
+            )
+            print(
+                "Resolved element counts (full cylinder): "
+                f"inner={n_inner}, outer={n_outer}, axial={n_z}, "
+                f"periodicity={mesh_input.periodicity}, total={total_elements}"
+            )
+            coords, knpr = build_full_cylinder_coordinates(
+                mesh_input.outer_diameter,
+                mesh_input.length,
+                mesh_input.start_z,
+                mesh_input.periodicity,
+                n_inner,
+                n_outer,
+                n_z,
+            )
+            cells = build_full_cylinder_connectivity(
+                mesh_input.periodicity, n_inner, n_outer, n_z
+            )
         else:
             n_t, n_r, n_z = resolve_annular_resolutions(
                 mesh_input.outer_diameter,

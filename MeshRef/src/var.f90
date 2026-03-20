@@ -123,6 +123,7 @@ module var_mod
   integer :: refinement_depth = 0
   logical :: reproducibility = .true.
   logical :: apply_cylindric_transform = .false.
+  real(rk) :: cylindrical_outer_radius = 0.0_rk
   type(element_patch_group), allocatable, target :: element_patches(:)
   type(element_patch_group), allocatable, target :: clean_element_patches(:)
   integer :: element_patch_count = 0

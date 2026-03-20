@@ -95,3 +95,17 @@ InnerDiameter = 440.0
 BarrelLength = 625.0
 AxialStartPosition = -54.0
 ```
+
+Example setup.e3d for FullCylinder-Mesh
+```
+[E3DGeometryData]
+[E3DGeometryData/Preprocessing]
+HexMesher=FullCylinder
+FullCylinderPeriodicity = 4   # optional, defaults to 4 when omitted
+sEl_Tangential = 1.25
+sEl_Radial = 0.80
+sEl_Axial = 1.25
+BarrelDiameter = 1000.0
+BarrelLength = 600.0
+AxialStartPosition = -54.0
+```

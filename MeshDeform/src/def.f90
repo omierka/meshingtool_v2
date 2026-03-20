@@ -250,7 +250,7 @@ contains
     select case (trim(mesh_type))
     case ('box')
        call assign_box_constraints(mesh, config, constraint_flags, compute_min_edge_length(mesh))
-    case ('hollowcylinder')
+    case ('hollowcylinder','fullcylinder')
        call assign_cylinder_constraints(mesh, config, constraint_flags, compute_min_edge_length(mesh))
     case default
        ! Unknown mesh type: keep all vertices unconstrained.
@@ -880,7 +880,7 @@ contains
     select case (trim(mesh_type))
     case ('box')
        characteristic_size = max(real(get_tolerance_floor(), rk), minval(max(lengths, 0.0_rk)))
-    case ('hollowcylinder')
+    case ('hollowcylinder','fullcylinder')
        radial_span = 0.0_rk
        if (config%cylinder%has_barrel_diameter .and. config%cylinder%has_inner_diameter) then
           radial_span = 0.5_rk * real(config%cylinder%barrel_diameter - config%cylinder%inner_diameter, rk)
