@@ -1,14 +1,28 @@
+#include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <unordered_set>
 
+#include <cgal_types.hpp>
 #include <meshhexer/meshhexer.hpp>
 #include <meshhexer/types.hpp>
 #include <meshhexer/config.hpp>
+#include <properties.hpp>
+#include <warnings.hpp>
+
+#include <CGAL/Polygon_mesh_processing/IO/polygon_mesh_io.h>
+#include <CGAL/Polygon_mesh_processing/repair.h>
+#include <CGAL/Polygon_mesh_processing/repair_degeneracies.h>
+#include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
+
+namespace PMP = CGAL::Polygon_mesh_processing;
 
 namespace MeshHexerCLI::Markdown
 {
@@ -32,6 +46,8 @@ namespace MeshHexerCLI
 {
   namespace
   {
+    constexpr double SMALL_FACE_RELATIVE_AREA = 1e-20;
+
     void print_min_gap(const MeshHexer::Gap& min_gap, bool verbose, double coarse_mesh_size)
     {
       if(verbose)
@@ -93,17 +109,23 @@ namespace MeshHexerCLI
     "\t\tThe output mesh is constructed such that all cells are about the same\n"
     "\t\tsize as their local min-gaps.\n"
     "\n"
-    "\tmin-gap\n"
-    "\t\tCalculate smallest inside gap between opposite faces of the mesh\n"
-    "\n"
-    "\treport\n"
-    "\t\tPrint information about the mesh\n"
-    "\n"
-    "\twarnings\n"
-    "\t\tPrint warnings about the mesh. Warns about self-intersections,\n"
-    "\t\tdegenerate triangles, and anisotropic triangles.\n"
-    "\n"
-    "See meshhexer-cli <command> --help for more details on the commands.\n";
+"\tmin-gap\n"
+"\t\tCalculate smallest inside gap between opposite faces of the mesh\n"
+"\n"
+"\treport\n"
+"\t\tPrint information about the mesh\n"
+"\n"
+"\twarnings\n"
+"\t\tPrint warnings about the mesh. Warns about self-intersections,\n"
+"\t\tdegenerate triangles, and anisotropic triangles.\n"
+"\n"
+"\trepair\n"
+"\t\tRemove degenerate triangles and isolated vertices, writing <input>_repaired.off\n"
+"\n"
+"\tprecheck\n"
+"\t\tDetect faces whose centroid normals vanish and would crash min-gap\n"
+"\n"
+"See meshhexer-cli <command> --help for more details on the commands.\n";
 
   const static char* const mingap_usage =
     "Usage: meshhexer-cli min-gap [<args>] <mesh>\n"
@@ -151,6 +173,33 @@ namespace MeshHexerCLI
     "Options:\n"
     "\t--summarize\n"
     "\t\tSummarize warnings\n";
+
+  const static char* const precheck_usage =
+    "Usage: meshhexer-cli precheck [<args>] <mesh>\n"
+    "\n"
+    "Load an input mesh and flag faces that would make the min-gap workflow abort:\n"
+    "- faces whose centroid normals collapse to zero (invalid rays)\n"
+    "- degenerate or near-zero-area triangles (violating CGAL assumptions)\n"
+    "\n"
+    "Options:\n"
+    "\t-h, --help\n"
+    "\t\tProduce this help text\n"
+    "\t--min-normal-length <value>\n"
+    "\t\tThreshold for the centroid normal magnitude (default 1e-12)\n"
+    "\t--max-report <value>\n"
+    "\t\tLimit how many offending faces are listed per category (default 20)\n";
+
+  const static char* const repair_usage =
+    "Usage: meshhexer-cli repair [<args>] <mesh>\n"
+    "\n"
+    "Remove degenerate triangles (collinear vertices) and isolated vertices, then write the cleaned mesh "
+    "to <mesh>_repaired.off unless --output is provided.\n"
+    "\n"
+    "Options:\n"
+    "\t-h, --help\n"
+    "\t\tProduce this help text\n"
+    "\t--output <path>\n"
+    "\t\tWrite the repaired mesh to the provided path (default: <mesh>_repaired.off)\n";
 
   /////////////////////
   // Parameter structs
@@ -214,6 +263,33 @@ namespace MeshHexerCLI
 
     /// Summarize warnings
     bool summarize = false;
+
+    /// Mesh file path
+    std::filesystem::path mesh_file;
+  };
+
+  struct PrecheckParameters
+  {
+    /// If true, show help text and end program
+    bool show_help = false;
+
+    /// Threshold for centroid-normal length
+    double min_normal_length = 1e-12;
+
+    /// Maximum number of offending faces to print
+    std::size_t max_report = 20;
+
+    /// Mesh file path
+    std::filesystem::path mesh_file;
+  };
+
+  struct RepairParameters
+  {
+    /// If true, show help text and end program
+    bool show_help = false;
+
+    /// Optional output path
+    std::optional<std::filesystem::path> output;
 
     /// Mesh file path
     std::filesystem::path mesh_file;
@@ -358,7 +434,7 @@ namespace MeshHexerCLI
 
       if(
         result.command != "fbm-mesh" && result.command != "min-gap" && result.command != "report" &&
-        result.command != "warnings")
+        result.command != "warnings" && result.command != "precheck" && result.command != "repair")
       {
         return Result::err("Invalid command " + result.command);
       }
@@ -568,6 +644,160 @@ namespace MeshHexerCLI
     }
 
     return Result::ok(result);
+  }
+
+  static MeshHexer::Result<PrecheckParameters, std::string> parse_precheck_args(int& argc, char*** argv)
+  {
+    using Result = MeshHexer::Result<PrecheckParameters, std::string>;
+
+    PrecheckParameters result;
+
+    while(argc > 0)
+    {
+      char* cmd = (*argv)[0];
+
+      if(cmp_argument("--help", cmd) || cmp_argument("-h", cmd))
+      {
+        consume_arg(argc, argv);
+        result.show_help = true;
+      }
+      else if(cmp_argument("--min-normal-length", cmd))
+      {
+        char* value = parse_argument("--min-normal-length", argc, argv);
+        char* endptr = nullptr;
+        double parsed = std::strtod(value, &endptr);
+        if(endptr == value)
+        {
+          return Result::err("Invalid value for --min-normal-length");
+        }
+        result.min_normal_length = parsed;
+      }
+      else if(cmp_argument("--max-report", cmd))
+      {
+        char* value = parse_argument("--max-report", argc, argv);
+        char* endptr = nullptr;
+        long parsed = std::strtol(value, &endptr, 10);
+        if(endptr == value || parsed <= 0)
+        {
+          return Result::err("Invalid value for --max-report");
+        }
+        result.max_report = static_cast<std::size_t>(parsed);
+      }
+      else
+      {
+        break;
+      }
+    }
+
+    if(argc > 0)
+    {
+      result.mesh_file = (*argv)[0];
+      consume_arg(argc, argv);
+    }
+    else if(!result.show_help)
+    {
+      return Result::err("Expected mesh file!");
+    }
+
+    return Result::ok(result);
+  }
+
+  static MeshHexer::Result<RepairParameters, std::string> parse_repair_args(int& argc, char*** argv)
+  {
+    using Result = MeshHexer::Result<RepairParameters, std::string>;
+
+    RepairParameters result;
+
+    while(argc > 0)
+    {
+      char* cmd = (*argv)[0];
+
+      if(cmp_argument("--help", cmd) || cmp_argument("-h", cmd))
+      {
+        consume_arg(argc, argv);
+        result.show_help = true;
+      }
+      else if(cmp_argument("--output", cmd))
+      {
+        char* value = parse_argument("--output", argc, argv);
+        result.output = std::filesystem::path(value);
+      }
+      else
+      {
+        break;
+      }
+    }
+
+    if(argc > 0)
+    {
+      result.mesh_file = (*argv)[0];
+      consume_arg(argc, argv);
+    }
+    else if(!result.show_help)
+    {
+      return Result::err("Expected mesh file!");
+    }
+
+    return Result::ok(result);
+  }
+
+  static MeshHexer::Result<MeshHexer::Mesh, std::string> load_editable_mesh(const std::filesystem::path& filename)
+  {
+    using Result = MeshHexer::Result<MeshHexer::Mesh, std::string>;
+
+    MeshHexer::Mesh mesh;
+    std::string extension = filename.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) {
+      return static_cast<char>(std::tolower(c));
+    });
+
+    if(extension == ".ply")
+    {
+      std::ifstream mesh_file(filename);
+      if(!mesh_file)
+      {
+        return Result::err("Failed to open mesh " + filename.string());
+      }
+      std::string comment;
+      if(!CGAL::IO::read_PLY(mesh_file, mesh, comment, true))
+      {
+        return Result::err("Failed to read mesh " + filename.string());
+      }
+    }
+    else
+    {
+      if(!PMP::IO::read_polygon_mesh(filename.string(), mesh))
+      {
+        return Result::err("Failed to read mesh " + filename.string());
+      }
+    }
+
+    if(CGAL::is_empty(mesh))
+    {
+      return Result::err("Mesh " + filename.string() + " is empty.");
+    }
+
+    if(!CGAL::is_triangle_mesh(mesh))
+    {
+      PMP::triangulate_faces(mesh);
+    }
+
+    return Result::ok(std::move(mesh));
+  }
+
+  static std::filesystem::path default_repair_path(const std::filesystem::path& input)
+  {
+    std::filesystem::path directory = input.parent_path();
+    if(directory.empty())
+    {
+      directory = ".";
+    }
+    std::string stem = input.stem().string();
+    if(stem.empty())
+    {
+      stem = "mesh";
+    }
+    return directory / (stem + "_repaired.off");
   }
 
   int main(int argc, char* argv[])
@@ -858,6 +1088,144 @@ namespace MeshHexerCLI
                     << MeshHexer::DegenerateTriangleWarning::name << "]\n";
         }
       }
+    }
+
+    if(gparams.command == "repair")
+    {
+      MeshHexer::Result<RepairParameters, std::string> parse_result = parse_repair_args(argc, &argv);
+
+      if(parse_result.is_err())
+      {
+        std::cerr << "Parameter parsing for command 'repair' failed with: " << parse_result.err_ref() << "\n";
+        exit(1);
+      }
+
+      RepairParameters params = parse_result.ok_value();
+
+      if(params.show_help)
+      {
+        std::cout << repair_usage;
+        exit(0);
+      }
+
+      MeshHexer::Result<MeshHexer::Mesh, std::string> mesh_result = load_editable_mesh(params.mesh_file);
+      if(mesh_result.is_err())
+      {
+        std::cerr << "Reading mesh failed with error: " << mesh_result.err_ref() << "\n";
+        exit(1);
+      }
+
+      MeshHexer::Mesh mesh = std::move(mesh_result).take_ok();
+
+      std::vector<MeshHexer::FaceIndex> small_area_faces =
+        MeshHexer::faces_with_small_area(mesh, SMALL_FACE_RELATIVE_AREA);
+      for(MeshHexer::FaceIndex f : small_area_faces)
+      {
+        mesh.remove_face(f);
+      }
+      mesh.collect_garbage();
+
+      std::size_t removed_faces = small_area_faces.size();
+      std::size_t removed_vertices = PMP::remove_isolated_vertices(mesh);
+      mesh.collect_garbage();
+
+      std::filesystem::path output = params.output.value_or(default_repair_path(params.mesh_file));
+      if(!output.has_extension())
+      {
+        output.replace_extension(".off");
+      }
+
+      if(!CGAL::IO::write_polygon_mesh(output.string(), mesh))
+      {
+        std::cerr << "Failed to write repaired mesh to " << output << "\n";
+        exit(1);
+      }
+
+      std::cout << "Wrote repaired mesh to " << output << " (removed " << removed_faces << " near-zero-area faces, "
+                << removed_vertices << " isolated vertices)\n";
+      exit(0);
+    }
+
+    if(gparams.command == "precheck")
+    {
+      MeshHexer::Result<PrecheckParameters, std::string> parse_result = parse_precheck_args(argc, &argv);
+
+      if(parse_result.is_err())
+      {
+        std::cerr << "Parameter parsing for command 'precheck' failed with: " << parse_result.err_ref() << "\n";
+        exit(1);
+      }
+
+      PrecheckParameters params = parse_result.ok_value();
+
+      if(params.show_help)
+      {
+        std::cout << precheck_usage;
+        exit(0);
+      }
+
+      MeshHexer::Result<MeshHexer::SurfaceMesh, std::string> result = MeshHexer::load_from_file(params.mesh_file, true);
+      if(result.is_err())
+      {
+        std::cout << "Reading mesh failed with error: " << result.err_ref() << "\n";
+        exit(1);
+      }
+
+      MeshHexer::SurfaceMesh mesh = std::move(result).take_ok();
+      std::vector<std::size_t> invalid_faces = mesh.faces_with_short_normals(params.min_normal_length);
+      std::vector<std::size_t> small_area_faces = mesh.faces_with_small_area(SMALL_FACE_RELATIVE_AREA);
+
+      // Merge explicit degeneracy warnings into small-area set to cover exact collinear cases.
+      MeshHexer::MeshWarnings warnings = mesh.warnings();
+      std::unordered_set<std::size_t> small_face_set(small_area_faces.begin(), small_area_faces.end());
+      for(const MeshHexer::DegenerateTriangleWarning& warning : warnings.degenerate_triangles)
+      {
+        if(small_face_set.insert(warning.idx).second)
+        {
+          small_area_faces.push_back(warning.idx);
+        }
+      }
+
+      if(invalid_faces.empty() && small_area_faces.empty())
+      {
+        std::cout << "Mesh passed: all centroid normals are >= " << params.min_normal_length
+                  << " and no near-zero-area triangles were found.\n";
+        exit(0);
+      }
+
+      if(!invalid_faces.empty())
+      {
+        std::cout << invalid_faces.size() << " face(s) have centroid normals shorter than " << params.min_normal_length
+                  << " and will make min-gap abort.\n";
+
+        std::size_t limit = std::min(invalid_faces.size(), params.max_report);
+        for(std::size_t i = 0; i < limit; ++i)
+        {
+          std::cout << "  Face " << invalid_faces[i] << "\n";
+        }
+
+        if(invalid_faces.size() > limit)
+        {
+          std::cout << "  ... " << (invalid_faces.size() - limit) << " more faces not listed\n";
+        }
+      }
+
+      if(!small_area_faces.empty())
+      {
+        std::cout << small_area_faces.size()
+                  << " triangle(s) have near-zero area (including degenerate triangles) and violate CGAL assumptions.\n";
+        std::size_t limit = std::min<std::size_t>(small_area_faces.size(), params.max_report);
+        for(std::size_t i = 0; i < limit; ++i)
+        {
+          std::cout << "  Face " << small_area_faces[i] << "\n";
+        }
+        if(small_area_faces.size() > limit)
+        {
+          std::cout << "  ... " << (small_area_faces.size() - limit) << " more faces not listed\n";
+        }
+      }
+
+      exit(2);
     }
 
     return 0;

@@ -101,4 +101,7 @@ The possible commands are
 
 - ``warnings``: Generates a list of warnings about bad triangles of the mesh. Currently checks for self-intersecting triangles, degenerate triangles, and highly anisotropic triangles. Pass ``--summarize`` to get a summary of warnings, instead of printing each warning individually.
 
+- ``precheck``: Load a mesh and flag faces that would make the min-gap pipeline abort (zero-length centroid normals or degenerate/near-zero-area triangles). Exit status is non-zero when problematic faces are found, making it easy to gate pipelines before running ``min-gap``.
+
+- ``repair``: Remove every degenerate/near-zero-area triangle and isolated vertex from the mesh, then write the cleaned mesh to ``<input>_repaired.off`` (or a custom ``--output``). Running ``precheck`` on the repaired mesh should succeed before invoking ``min-gap``.
 

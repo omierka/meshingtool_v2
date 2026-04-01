@@ -12,6 +12,7 @@ target_sources(meshhexer-cli
   TYPE HEADERS
   FILES ${MESHHEXER_CLI_HEADERS})
 target_link_libraries(meshhexer-cli PRIVATE MeshHexer)
+target_include_directories(meshhexer-cli PRIVATE ${PROJECT_SOURCE_DIR}/src)
 
 if(MESHHEXER_INSTALL)
   install(

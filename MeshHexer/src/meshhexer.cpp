@@ -112,6 +112,12 @@ namespace MeshHexer
     /// \copydoc SurfaceMesh::warnings()
     MeshWarnings warnings() const;
 
+    /// \copydoc SurfaceMesh::faces_with_short_normals()
+    std::vector<std::size_t> faces_with_short_normals(double min_length);
+
+    /// \copydoc SurfaceMesh::faces_with_small_area()
+    std::vector<std::size_t> faces_with_small_area(double relative_threshold) const;
+
     /// \copydoc SurfaceMesh::write_to_file()
     Result<void, std::string> write_to_file(const std::string& filename);
 
@@ -420,6 +426,32 @@ namespace MeshHexer
     return ws;
   }
 
+  std::vector<std::size_t> SurfaceMesh::SurfaceMeshImpl::faces_with_short_normals(double min_length)
+  {
+    std::vector<FaceIndex> invalid_faces = faces_with_short_vertex_normals(_mesh, min_length);
+    std::vector<std::size_t> indices;
+    indices.reserve(invalid_faces.size());
+
+    for(FaceIndex f : invalid_faces)
+    {
+      indices.push_back(static_cast<std::size_t>(f));
+    }
+
+    return indices;
+  }
+
+  std::vector<std::size_t> SurfaceMesh::SurfaceMeshImpl::faces_with_small_area(double relative_threshold) const
+  {
+    std::vector<FaceIndex> small_faces = MeshHexer::faces_with_small_area(_mesh, relative_threshold);
+    std::vector<std::size_t> indices;
+    indices.reserve(small_faces.size());
+    for(FaceIndex f : small_faces)
+    {
+      indices.push_back(static_cast<std::size_t>(f));
+    }
+    return indices;
+  }
+
   SurfaceMesh::SurfaceMesh() = default;
 
   SurfaceMesh::SurfaceMesh(std::unique_ptr<SurfaceMesh::SurfaceMeshImpl> ptr) : impl(std::move(ptr))
@@ -498,6 +530,16 @@ namespace MeshHexer
   MeshWarnings SurfaceMesh::warnings() const
   {
     return impl->warnings();
+  }
+
+  std::vector<std::size_t> SurfaceMesh::faces_with_short_normals(double min_length)
+  {
+    return impl->faces_with_short_normals(min_length);
+  }
+
+  std::vector<std::size_t> SurfaceMesh::faces_with_small_area(double relative_threshold) const
+  {
+    return impl->faces_with_small_area(relative_threshold);
   }
 
   Result<SurfaceMesh, std::string> load_from_file(const std::string& filename, bool triangulate)

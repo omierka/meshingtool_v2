@@ -195,6 +195,24 @@ namespace MeshHexer
     MeshWarnings warnings() const;
 
     /**
+     * \brief Faces whose centroid normals fall below the requested magnitude.
+     *
+     * These faces will cause the min-gap pipeline to fail because the ray cast through the
+     * centroid can not be defined without a valid inward normal.
+     *
+     * \param[in] min_length Minimum allowed length of the interpolated centroid normal
+     * \returns Indices of faces violating the threshold
+     */
+    std::vector<std::size_t> faces_with_short_normals(double min_length = 1e-12);
+    /**
+     * \brief Faces whose geometric area is below a relative threshold.
+     *
+     * \param[in] relative_threshold Relative area threshold with respect to mesh size squared.
+     * \returns Indices of faces violating the threshold
+     */
+    std::vector<std::size_t> faces_with_small_area(double relative_threshold = 1e-20) const;
+
+    /**
      * \brief Write the surface mesh to disk
      *
      * \param[in] filename Filename to write to. Must end in .ply or .vtu

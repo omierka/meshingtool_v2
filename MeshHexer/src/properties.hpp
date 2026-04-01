@@ -82,6 +82,10 @@ namespace MeshHexer
   std::vector<MonitorHistogramBin> monitor_histogram(Mesh& mesh, double min_gap_diameter);
   double adjusted_min_gap_from_histogram(const std::vector<MonitorHistogramBin>& bins, double min_gap_diameter);
   std::pair<std::size_t, std::size_t> monitor_histogram_min_max_indices(const std::vector<MonitorHistogramBin>& bins);
+  /// Faces whose centroid normals fall below the requested magnitude
+  std::vector<FaceIndex> faces_with_short_vertex_normals(Mesh& mesh, double min_length);
+  /// Faces whose geometric area falls below a relative threshold
+  std::vector<FaceIndex> faces_with_small_area(const Mesh& mesh, double relative_threshold);
 
   std::vector<std::pair<Point2D, double>> z_depths(Mesh& mesh, AABBTree& aabb_tree);
 } // namespace MeshHexer

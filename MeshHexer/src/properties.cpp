@@ -1,4 +1,5 @@
 #include <cgal_types.hpp>
+#include <cmath>
 #include <limits>
 #include <macros.hpp>
 #include <properties.hpp>
@@ -815,6 +816,68 @@ namespace MeshHexer
     }
 
     return {min_index, max_index};
+  }
+
+  std::vector<FaceIndex> faces_with_short_vertex_normals(Mesh& mesh, double min_length)
+  {
+    const double clamped = std::max(0.0, min_length);
+    const double min_sq = clamped * clamped;
+
+    compute_vertex_normals(mesh);
+
+    std::vector<FaceIndex> invalid;
+    invalid.reserve(mesh.num_faces());
+
+    for(FaceIndex face_index : mesh.faces())
+    {
+      Point3D centroid(0.0, 0.0, 0.0);
+      int vertex_count = 0;
+      for(VertexIndex v : mesh.vertices_around_face(mesh.halfedge(face_index)))
+      {
+        centroid += Real(1.0 / 3.0) * Vector3D(Point3D(CGAL::Origin()), mesh.point(v));
+        ++vertex_count;
+      }
+
+      if(vertex_count == 0)
+      {
+        continue;
+      }
+
+      Vector3D normal(surface_normal(mesh, face_index, centroid));
+      if(normal.squared_length() <= min_sq)
+      {
+        invalid.push_back(face_index);
+      }
+    }
+
+    return invalid;
+  }
+
+  std::vector<FaceIndex> faces_with_small_area(const Mesh& mesh, double relative_threshold)
+  {
+    std::vector<FaceIndex> invalid;
+    if(mesh.num_faces() == 0 || relative_threshold <= 0.0)
+    {
+      return invalid;
+    }
+
+    const double size = mesh_size(mesh);
+    if(size <= 0.0)
+    {
+      return invalid;
+    }
+
+    const double min_area = (size * size) * relative_threshold;
+    for(FaceIndex face_index : mesh.faces())
+    {
+      double area = CGAL::to_double(CGAL::Polygon_mesh_processing::face_area(face_index, mesh));
+      if(std::abs(area) <= min_area)
+      {
+        invalid.push_back(face_index);
+      }
+    }
+
+    return invalid;
   }
 
   void topological_distances(Mesh& mesh, const std::string& targets_property, double max_distance)
