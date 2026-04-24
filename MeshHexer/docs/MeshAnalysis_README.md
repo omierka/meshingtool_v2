@@ -273,7 +273,6 @@ and prints the normal mesh report together with an additional `Round Geometry An
 
 Use this feature:
 
-- after the mesh has passed `precheck`
 - for `FullCylinder` and `HollowCylinder` cases only
 - when a matching `setup.e3d` with inflow definitions is present next to the surface mesh
 

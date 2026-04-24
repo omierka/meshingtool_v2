@@ -90,6 +90,7 @@ namespace MeshHexer
       load_value(tree, "2DMeshAnalysis/MingapDesign.monitor_histogram_eps", cfg.monitor_histogram_eps);
       load_value(tree, "2DMeshAnalysis/MingapDesign.histogram_target_fraction", cfg.histogram_target_fraction);
       load_value(tree, "2DMeshAnalysis/MingapDesign.histogram_min_fraction_threshold", cfg.histogram_min_fraction_threshold);
+      load_value(tree, "2DMeshAnalysis/MingapDesign.histogram_min_fraction_connected_threshold", cfg.histogram_min_fraction_connected_threshold);
       load_value(tree, "2DMeshAnalysis/MingapDesign.histogram_max_fraction_threshold", cfg.histogram_max_fraction_threshold);
 
       {
@@ -116,7 +117,6 @@ namespace MeshHexer
         }
         cfg.min_histogram_span_bins = parsed;
       }
-
       load_value(tree, "2DMeshAnalysis/MingapDesign.coarse_mesh_scaling", cfg.coarse_mesh_scaling);
       return cfg;
     }
@@ -133,6 +133,17 @@ namespace MeshHexer
       load_value(tree, "MeshAnalysis.preprocessing_sel_x", cfg.preprocessing_sel_x);
       load_value(tree, "MeshAnalysis.preprocessing_sel_y", cfg.preprocessing_sel_y);
       load_value(tree, "MeshAnalysis.preprocessing_sel_z", cfg.preprocessing_sel_z);
+      if(auto raw = get_raw(tree, "MeshAnalysis.default_geometry_type"))
+      {
+        std::string parsed = *raw;
+        std::transform(parsed.begin(), parsed.end(), parsed.begin(), [](unsigned char c) {
+          return static_cast<char>(std::toupper(c));
+        });
+        if(!parsed.empty())
+        {
+          cfg.default_geometry_type = parsed;
+        }
+      }
       return cfg;
     }
 

@@ -11,6 +11,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <unistd.h>
@@ -23,8 +24,6 @@
 #include <warnings.hpp>
 
 #include <CGAL/Polygon_mesh_processing/IO/polygon_mesh_io.h>
-#include <CGAL/Polygon_mesh_processing/repair.h>
-#include <CGAL/Polygon_mesh_processing/repair_degeneracies.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 
 namespace PMP = CGAL::Polygon_mesh_processing;
@@ -61,6 +60,12 @@ namespace MeshHexerCLI
       std::string geometry_length_raw;
       bool has_geometry_start = false;
       bool has_geometry_length = false;
+      std::string preprocessing_geometry_start_raw;
+      std::string preprocessing_geometry_length_raw;
+      bool has_preprocessing_geometry_start = false;
+      bool has_preprocessing_geometry_length = false;
+      std::string preprocessing_hexmesher;
+      bool has_preprocessing_hexmesher = false;
       std::vector<MeshHexer::RoundGeometryInflow> inflows;
     };
 
@@ -204,6 +209,24 @@ namespace MeshHexerCLI
         {
           result.geometry_length_raw = value;
           result.has_geometry_length = !result.geometry_length_raw.empty();
+          continue;
+        }
+        if(lowercase_copy(current_section) == "e3dgeometrydata/preprocessing" && key == "geometrystart")
+        {
+          result.preprocessing_geometry_start_raw = value;
+          result.has_preprocessing_geometry_start = !result.preprocessing_geometry_start_raw.empty();
+          continue;
+        }
+        if(lowercase_copy(current_section) == "e3dgeometrydata/preprocessing" && key == "geometrylength")
+        {
+          result.preprocessing_geometry_length_raw = value;
+          result.has_preprocessing_geometry_length = !result.preprocessing_geometry_length_raw.empty();
+          continue;
+        }
+        if(lowercase_copy(current_section) == "e3dgeometrydata/preprocessing" && key == "hexmesher")
+        {
+          result.preprocessing_hexmesher = value;
+          result.has_preprocessing_hexmesher = !result.preprocessing_hexmesher.empty();
           continue;
         }
 
@@ -370,6 +393,14 @@ namespace MeshHexerCLI
       return lines;
     }
 
+    bool has_preconfigured_box_preprocessing(const ParsedRoundSetup& setup)
+    {
+      return setup.has_preprocessing_geometry_start &&
+             setup.has_preprocessing_geometry_length &&
+             setup.has_preprocessing_hexmesher &&
+             lowercase_copy(trim_copy(setup.preprocessing_hexmesher)) == "box";
+    }
+
     std::string split_inline_comment(std::string& value)
     {
       const std::size_t comment_pos = value.find_first_of("#;");
@@ -380,6 +411,102 @@ namespace MeshHexerCLI
       std::string comment = value.substr(comment_pos);
       value = value.substr(0, comment_pos);
       return comment;
+    }
+
+    std::unordered_map<std::string, std::string> parse_section_key_values(
+      const std::filesystem::path& setup_path,
+      const std::string& target_section)
+    {
+      std::unordered_map<std::string, std::string> values;
+      std::ifstream input(setup_path);
+      if(!input)
+      {
+        return values;
+      }
+
+      std::string current_section;
+      std::string line;
+      while(std::getline(input, line))
+      {
+        const std::string trimmed_line = trim_copy(line);
+        if(trimmed_line.empty() || trimmed_line[0] == '#' || trimmed_line[0] == ';' || trimmed_line[0] == '!')
+        {
+          continue;
+        }
+        if(trimmed_line.front() == '[' && trimmed_line.back() == ']')
+        {
+          current_section = lowercase_copy(trim_copy(trimmed_line.substr(1, trimmed_line.size() - 2)));
+          continue;
+        }
+        if(current_section != lowercase_copy(target_section))
+        {
+          continue;
+        }
+
+        const std::size_t eq_pos = line.find('=');
+        if(eq_pos == std::string::npos || eq_pos == 0 || eq_pos + 1 >= line.size())
+        {
+          continue;
+        }
+
+        std::string value = line.substr(eq_pos + 1);
+        split_inline_comment(value);
+        values[lowercase_copy(trim_copy(line.substr(0, eq_pos)))] = trim_copy(value);
+      }
+
+      return values;
+    }
+
+    bool round_preprocessing_section_matches(
+      const std::filesystem::path& setup_path,
+      const MeshHexer::RoundGeometryAnalysisResult& analysis,
+      const MeshHexer::RoundGeometryAnalysisConfig& config)
+    {
+      static const std::vector<std::string> managed_keys = {
+        "barreldiameter",
+        "innerdiameter",
+        "barrellength",
+        "axialstartposition",
+        "hexmesher",
+        "fullcylinderperiodicity",
+        "sel_tangential",
+        "sel_radial",
+        "sel_axial",
+      };
+
+      const std::unordered_map<std::string, std::string> existing =
+        parse_section_key_values(setup_path, "E3DGeometryData/Preprocessing");
+
+      std::unordered_map<std::string, std::string> expected;
+      for(const std::string& line : preprocessing_section_lines(analysis, config))
+      {
+        const std::size_t eq_pos = line.find('=');
+        if(eq_pos == std::string::npos || eq_pos == 0 || eq_pos + 1 >= line.size())
+        {
+          continue;
+        }
+        expected[lowercase_copy(trim_copy(line.substr(0, eq_pos)))] = trim_copy(line.substr(eq_pos + 1));
+      }
+
+      for(const std::string& key : managed_keys)
+      {
+        const auto expected_it = expected.find(key);
+        const auto existing_it = existing.find(key);
+        if(expected_it == expected.end())
+        {
+          if(existing_it != existing.end())
+          {
+            return false;
+          }
+          continue;
+        }
+        if(existing_it == existing.end() || existing_it->second != expected_it->second)
+        {
+          return false;
+        }
+      }
+
+      return true;
     }
 
     MeshHexer::Result<SetupRewriteResult, std::string> rewrite_setup_for_round_geometry(
@@ -689,12 +816,6 @@ namespace MeshHexerCLI
 "\t\tPrint warnings about the mesh. Warns about self-intersections,\n"
 "\t\tdegenerate triangles, and anisotropic triangles.\n"
 "\n"
-"\trepair\n"
-"\t\tRemove degenerate triangles and isolated vertices, writing <input>_repaired.off\n"
-"\n"
-"\tprecheck\n"
-"\t\tDetect faces whose centroid normals vanish and would crash min-gap\n"
-"\n"
 "See meshhexer-cli <command> --help for more details on the commands.\n";
 
   const static char* const mingap_usage =
@@ -748,33 +869,6 @@ namespace MeshHexerCLI
     "Options:\n"
     "\t--summarize\n"
     "\t\tSummarize warnings\n";
-
-  const static char* const precheck_usage =
-    "Usage: meshhexer-cli precheck [<args>] <mesh>\n"
-    "\n"
-    "Load an input mesh and flag faces that would make the min-gap workflow abort:\n"
-    "- faces whose centroid normals collapse to zero (invalid rays)\n"
-    "- degenerate or near-zero-area triangles (violating CGAL assumptions)\n"
-    "\n"
-    "Options:\n"
-    "\t-h, --help\n"
-    "\t\tProduce this help text\n"
-    "\t--min-normal-length <value>\n"
-    "\t\tThreshold for the centroid normal magnitude (default 1e-12)\n"
-    "\t--max-report <value>\n"
-    "\t\tLimit how many offending faces are listed per category (default 20)\n";
-
-  const static char* const repair_usage =
-    "Usage: meshhexer-cli repair [<args>] <mesh>\n"
-    "\n"
-    "Remove degenerate triangles (collinear vertices) and isolated vertices, then write the cleaned mesh "
-    "to <mesh>_repaired.off unless --output is provided.\n"
-    "\n"
-    "Options:\n"
-    "\t-h, --help\n"
-    "\t\tProduce this help text\n"
-    "\t--output <path>\n"
-    "\t\tWrite the repaired mesh to the provided path (default: <mesh>_repaired.off)\n";
 
   /////////////////////
   // Parameter structs
@@ -841,33 +935,6 @@ namespace MeshHexerCLI
 
     /// Summarize warnings
     bool summarize = false;
-
-    /// Mesh file path
-    std::filesystem::path mesh_file;
-  };
-
-  struct PrecheckParameters
-  {
-    /// If true, show help text and end program
-    bool show_help = false;
-
-    /// Threshold for centroid-normal length
-    double min_normal_length = 1e-12;
-
-    /// Maximum number of offending faces to print
-    std::size_t max_report = 20;
-
-    /// Mesh file path
-    std::filesystem::path mesh_file;
-  };
-
-  struct RepairParameters
-  {
-    /// If true, show help text and end program
-    bool show_help = false;
-
-    /// Optional output path
-    std::optional<std::filesystem::path> output;
 
     /// Mesh file path
     std::filesystem::path mesh_file;
@@ -1012,7 +1079,7 @@ namespace MeshHexerCLI
 
       if(
         result.command != "fbm-mesh" && result.command != "min-gap" && result.command != "report" &&
-        result.command != "warnings" && result.command != "precheck" && result.command != "repair")
+        result.command != "warnings")
       {
         return Result::err("Invalid command " + result.command);
       }
@@ -1229,101 +1296,6 @@ namespace MeshHexerCLI
     return Result::ok(result);
   }
 
-  static MeshHexer::Result<PrecheckParameters, std::string> parse_precheck_args(int& argc, char*** argv)
-  {
-    using Result = MeshHexer::Result<PrecheckParameters, std::string>;
-
-    PrecheckParameters result;
-
-    while(argc > 0)
-    {
-      char* cmd = (*argv)[0];
-
-      if(cmp_argument("--help", cmd) || cmp_argument("-h", cmd))
-      {
-        consume_arg(argc, argv);
-        result.show_help = true;
-      }
-      else if(cmp_argument("--min-normal-length", cmd))
-      {
-        char* value = parse_argument("--min-normal-length", argc, argv);
-        char* endptr = nullptr;
-        double parsed = std::strtod(value, &endptr);
-        if(endptr == value)
-        {
-          return Result::err("Invalid value for --min-normal-length");
-        }
-        result.min_normal_length = parsed;
-      }
-      else if(cmp_argument("--max-report", cmd))
-      {
-        char* value = parse_argument("--max-report", argc, argv);
-        char* endptr = nullptr;
-        long parsed = std::strtol(value, &endptr, 10);
-        if(endptr == value || parsed <= 0)
-        {
-          return Result::err("Invalid value for --max-report");
-        }
-        result.max_report = static_cast<std::size_t>(parsed);
-      }
-      else
-      {
-        break;
-      }
-    }
-
-    if(argc > 0)
-    {
-      result.mesh_file = (*argv)[0];
-      consume_arg(argc, argv);
-    }
-    else if(!result.show_help)
-    {
-      return Result::err("Expected mesh file!");
-    }
-
-    return Result::ok(result);
-  }
-
-  static MeshHexer::Result<RepairParameters, std::string> parse_repair_args(int& argc, char*** argv)
-  {
-    using Result = MeshHexer::Result<RepairParameters, std::string>;
-
-    RepairParameters result;
-
-    while(argc > 0)
-    {
-      char* cmd = (*argv)[0];
-
-      if(cmp_argument("--help", cmd) || cmp_argument("-h", cmd))
-      {
-        consume_arg(argc, argv);
-        result.show_help = true;
-      }
-      else if(cmp_argument("--output", cmd))
-      {
-        char* value = parse_argument("--output", argc, argv);
-        result.output = std::filesystem::path(value);
-      }
-      else
-      {
-        break;
-      }
-    }
-
-    if(argc > 0)
-    {
-      result.mesh_file = (*argv)[0];
-      consume_arg(argc, argv);
-    }
-    else if(!result.show_help)
-    {
-      return Result::err("Expected mesh file!");
-    }
-
-    return Result::ok(result);
-  }
-
   static MeshHexer::Result<MeshHexer::Mesh, std::string> load_editable_mesh(const std::filesystem::path& filename)
   {
     using Result = MeshHexer::Result<MeshHexer::Mesh, std::string>;
@@ -1366,21 +1338,6 @@ namespace MeshHexerCLI
     }
 
     return Result::ok(std::move(mesh));
-  }
-
-  static std::filesystem::path default_repair_path(const std::filesystem::path& input)
-  {
-    std::filesystem::path directory = input.parent_path();
-    if(directory.empty())
-    {
-      directory = ".";
-    }
-    std::string stem = input.stem().string();
-    if(stem.empty())
-    {
-      stem = "mesh";
-    }
-    return directory / (stem + "_repaired.off");
   }
 
   int main(int argc, char* argv[])
@@ -1574,6 +1531,12 @@ namespace MeshHexerCLI
       MeshHexer::Gap min_gap = mesh.min_gap();
       const double coarse_mesh_size = min_gap.diameter * MeshHexer::min_gap_config().coarse_mesh_scaling *
         std::pow(3.0, static_cast<double>(min_gap.bin_span));
+      std::cerr << "Min-gap monitor histogram (area-based, factor-of-3 bins; Collections = connected agglomerates "
+                   "with area >= "
+                << (MeshHexer::min_gap_config().histogram_min_fraction_connected_threshold * 100.0)
+                << "% of total surface using faces from this bin only; Connected/Isolated/Max Component % "
+                   "are measured against the total histogram-covered area)\n";
+      mesh.write_monitor_histogram(std::cerr);
       print_min_gap(min_gap, params.verbose, coarse_mesh_size);
 
       if(!temp_analysis_mesh_path.empty())
@@ -1629,13 +1592,17 @@ namespace MeshHexerCLI
           exit(1);
         }
 
-        if(!setup_result.ok_ref().has_geometry_type)
+        const MeshHexer::RoundGeometryAnalysisConfig& analysis_config = MeshHexer::round_geometry_analysis_config();
+        ParsedRoundSetup parsed_setup = setup_result.ok_value();
+        std::string geometry_type = parsed_setup.geometry_type;
+        bool geometry_type_from_default = false;
+        if(!parsed_setup.has_geometry_type)
         {
-          std::cerr << "Case configuration failed: missing E3DGeometryData/Machine.GeometryType in " << setup_path
-                    << "\n";
-          exit(1);
+          geometry_type = analysis_config.default_geometry_type;
+          geometry_type_from_default = true;
         }
-        if(setup_result.ok_ref().geometry_type == "BOX")
+
+        if(geometry_type == "BOX")
         {
           MeshHexer::Result<std::filesystem::path, std::string> mesh_path_result =
             resolve_report_mesh_path(case_dir);
@@ -1657,39 +1624,53 @@ namespace MeshHexerCLI
           std::filesystem::path absolute_path = std::filesystem::canonical(mesh_path);
           MeshHexer::MeshWarnings warnings = mesh.warnings();
 
-          const MeshHexer::RoundGeometryAnalysisConfig& analysis_config = MeshHexer::round_geometry_analysis_config();
-          MeshHexer::Result<SetupRewriteResult, std::string> rewrite_result =
-            rewrite_setup_for_box_geometry(setup_path, setup_result.ok_ref(), analysis_config);
-          if(rewrite_result.is_err())
-          {
-            std::cerr << "BOX setup rewrite failed with: " << rewrite_result.err_ref() << "\n";
-            exit(1);
-          }
+          const bool box_needs_population = parsed_setup.has_geometry_start && parsed_setup.has_geometry_length;
+          const bool box_already_prepared = has_preconfigured_box_preprocessing(parsed_setup);
+          bool setup_rewritten = false;
+          std::filesystem::path backup_setup_path = case_dir / "setup_BU.e3d";
 
-          const std::filesystem::path backup_setup_path = case_dir / "setup_BU.e3d";
-          const std::filesystem::path temp_setup_path = case_dir / "setup.e3d.tmp";
-          std::error_code ec;
-          std::filesystem::copy_file(
-            setup_path,
-            backup_setup_path,
-            std::filesystem::copy_options::overwrite_existing,
-            ec);
-          if(ec)
+          if(box_needs_population)
           {
-            std::cerr << "Failed to back up setup file to " << backup_setup_path << ": " << ec.message() << "\n";
-            exit(1);
+            MeshHexer::Result<SetupRewriteResult, std::string> rewrite_result =
+              rewrite_setup_for_box_geometry(setup_path, parsed_setup, analysis_config);
+            if(rewrite_result.is_err())
+            {
+              std::cerr << "BOX setup rewrite failed with: " << rewrite_result.err_ref() << "\n";
+              exit(1);
+            }
+
+            const std::filesystem::path temp_setup_path = case_dir / "setup.e3d.tmp";
+            std::error_code ec;
+            std::filesystem::copy_file(
+              setup_path,
+              backup_setup_path,
+              std::filesystem::copy_options::overwrite_existing,
+              ec);
+            if(ec)
+            {
+              std::cerr << "Failed to back up setup file to " << backup_setup_path << ": " << ec.message() << "\n";
+              exit(1);
+            }
+            if(!write_text_lines(temp_setup_path, rewrite_result.ok_ref().lines))
+            {
+              std::cerr << "Failed to write updated setup file " << temp_setup_path << "\n";
+              std::filesystem::remove(temp_setup_path, ec);
+              exit(1);
+            }
+            std::filesystem::rename(temp_setup_path, setup_path, ec);
+            if(ec)
+            {
+              std::cerr << "Failed to replace setup file " << setup_path << ": " << ec.message() << "\n";
+              std::filesystem::remove(temp_setup_path, ec);
+              exit(1);
+            }
+            setup_rewritten = true;
           }
-          if(!write_text_lines(temp_setup_path, rewrite_result.ok_ref().lines))
+          else if(!box_already_prepared)
           {
-            std::cerr << "Failed to write updated setup file " << temp_setup_path << "\n";
-            std::filesystem::remove(temp_setup_path, ec);
-            exit(1);
-          }
-          std::filesystem::rename(temp_setup_path, setup_path, ec);
-          if(ec)
-          {
-            std::cerr << "Failed to replace setup file " << setup_path << ": " << ec.message() << "\n";
-            std::filesystem::remove(temp_setup_path, ec);
+            std::cerr << "BOX setup rewrite failed: neither geometryStart/geometryLength in [E3DGeometryData/Machine] "
+                      << "nor a prepared [E3DGeometryData/Preprocessing] Box section were found in "
+                      << setup_path << "\n";
             exit(1);
           }
 
@@ -1726,15 +1707,28 @@ namespace MeshHexerCLI
                     << "\n\n";
           std::cout << Markdown::h2("Box Preprocessing") << "\n";
           std::cout << Markdown::li("setup.e3d: " + setup_path.string()) << "\n";
-          std::cout << Markdown::li("setup backup: " + backup_setup_path.string()) << "\n";
-          std::cout << Markdown::li("geometryStart moved to preprocessing: " + setup_result.ok_ref().geometry_start_raw) << "\n";
-          std::cout << Markdown::li("geometryLength moved to preprocessing: " + setup_result.ok_ref().geometry_length_raw) << "\n";
-          std::cout << Markdown::li("setup.e3d preprocessing section refreshed for Box") << "\n\n";
+          if(geometry_type_from_default)
+          {
+            std::cout << Markdown::li("GeometryType: defaulted to " + geometry_type + " from preprocessor.cfg") << "\n";
+          }
+          if(setup_rewritten)
+          {
+            std::cout << Markdown::li("setup backup: " + backup_setup_path.string()) << "\n";
+            std::cout << Markdown::li("geometryStart moved to preprocessing: " + parsed_setup.geometry_start_raw) << "\n";
+            std::cout << Markdown::li("geometryLength moved to preprocessing: " + parsed_setup.geometry_length_raw) << "\n";
+            std::cout << Markdown::li("setup.e3d preprocessing section refreshed for Box") << "\n\n";
+          }
+          else
+          {
+            std::cout << Markdown::li(
+                           "setup.e3d preprocessing section already prepared for Box; setup file left unchanged")
+                      << "\n\n";
+          }
           return 0;
         }
-        if(setup_result.ok_ref().geometry_type != "ROUND")
+        if(geometry_type != "ROUND")
         {
-          std::cerr << "Case configuration failed: unsupported GeometryType=" << setup_result.ok_ref().geometry_type
+          std::cerr << "Case configuration failed: unsupported GeometryType=" << geometry_type
                     << "\n";
           exit(1);
         }
@@ -1791,9 +1785,8 @@ namespace MeshHexerCLI
         std::cout << Markdown::li("Anisotropic triangles: " + std::to_string(warnings.anisotropic_triangles.size()))
                   << "\n\n";
 
-        const MeshHexer::RoundGeometryAnalysisConfig& analysis_config = MeshHexer::round_geometry_analysis_config();
         MeshHexer::Result<MeshHexer::RoundGeometryAnalysisResult, std::string> analysis_result =
-          mesh.round_geometry_analysis(setup_result.ok_ref().inflows, analysis_config);
+          mesh.round_geometry_analysis(parsed_setup.inflows, analysis_config);
         if(analysis_result.is_err())
         {
           std::cerr << "Round geometry analysis failed with: " << analysis_result.err_ref() << "\n";
@@ -1843,17 +1836,13 @@ namespace MeshHexerCLI
 
         if(params.configure_case_for_preprocessing)
         {
-          const double shift_x = -analysis.axis_center.x;
-          const double shift_y = -analysis.axis_center.y;
+          const double shift_x = analysis.axis_aligned_to_origin ? 0.0 : -analysis.axis_center.x;
+          const double shift_y = analysis.axis_aligned_to_origin ? 0.0 : -analysis.axis_center.y;
+          const bool setup_preprocessing_matches =
+            round_preprocessing_section_matches(setup_path, analysis, analysis_config);
+          const bool setup_requires_update = !analysis.axis_aligned_to_origin || !setup_preprocessing_matches;
 
-          MeshHexer::Result<SetupRewriteResult, std::string> rewrite_result =
-            rewrite_setup_for_round_geometry(setup_path, shift_x, shift_y, analysis, analysis_config);
-          if(rewrite_result.is_err())
-          {
-            std::cerr << "Round geometry setup rewrite failed with: " << rewrite_result.err_ref() << "\n";
-            exit(1);
-          }
-
+          std::optional<SetupRewriteResult> rewrite_result;
           const std::filesystem::path backup_surface_path = absolute_path.parent_path() / "surface_BU.off";
           const std::filesystem::path backup_setup_path = absolute_path.parent_path() / "setup_BU.e3d";
           const std::string mesh_extension = absolute_path.has_extension() ? absolute_path.extension().string() : ".off";
@@ -1861,69 +1850,81 @@ namespace MeshHexerCLI
             absolute_path.parent_path() / (absolute_path.stem().string() + ".tmp" + mesh_extension);
           const std::filesystem::path temp_setup_path = absolute_path.parent_path() / "setup.e3d.tmp";
 
-          std::error_code ec;
-          std::filesystem::copy_file(
-            setup_path,
-            backup_setup_path,
-            std::filesystem::copy_options::overwrite_existing,
-            ec);
-          if(ec)
+          if(setup_requires_update)
           {
-            std::cerr << "Failed to back up setup file to " << backup_setup_path << ": " << ec.message() << "\n";
-            exit(1);
-          }
+            MeshHexer::Result<SetupRewriteResult, std::string> rewrite_attempt =
+              rewrite_setup_for_round_geometry(setup_path, shift_x, shift_y, analysis, analysis_config);
+            if(rewrite_attempt.is_err())
+            {
+              std::cerr << "Round geometry setup rewrite failed with: " << rewrite_attempt.err_ref() << "\n";
+              exit(1);
+            }
+            rewrite_result = rewrite_attempt.ok_value();
 
-          if(!analysis.axis_aligned_to_origin)
-          {
+            std::error_code ec;
             std::filesystem::copy_file(
-              absolute_path,
-              backup_surface_path,
+              setup_path,
+              backup_setup_path,
               std::filesystem::copy_options::overwrite_existing,
               ec);
             if(ec)
             {
-              std::cerr << "Failed to back up surface mesh to " << backup_surface_path << ": " << ec.message() << "\n";
+              std::cerr << "Failed to back up setup file to " << backup_setup_path << ": " << ec.message() << "\n";
               exit(1);
             }
 
-            MeshHexer::SurfaceMesh shifted_mesh = std::move(mesh);
-            shifted_mesh.translate(shift_x, shift_y, 0.0);
-
-            MeshHexer::Result<void, std::string> write_result = shifted_mesh.write_to_file(temp_surface_path.string());
-            if(write_result.is_err())
+            if(!analysis.axis_aligned_to_origin)
             {
-              std::cerr << "Failed to write shifted mesh: " << write_result.err_ref() << "\n";
-              std::filesystem::remove(temp_surface_path, ec);
-              exit(1);
+              std::filesystem::copy_file(
+                absolute_path,
+                backup_surface_path,
+                std::filesystem::copy_options::overwrite_existing,
+                ec);
+              if(ec)
+              {
+                std::cerr << "Failed to back up surface mesh to " << backup_surface_path << ": " << ec.message() << "\n";
+                exit(1);
+              }
+
+              MeshHexer::SurfaceMesh shifted_mesh = std::move(mesh);
+              shifted_mesh.translate(shift_x, shift_y, 0.0);
+
+              MeshHexer::Result<void, std::string> write_result = shifted_mesh.write_to_file(temp_surface_path.string());
+              if(write_result.is_err())
+              {
+                std::cerr << "Failed to write shifted mesh: " << write_result.err_ref() << "\n";
+                std::filesystem::remove(temp_surface_path, ec);
+                exit(1);
+              }
             }
-          }
 
-          if(!write_text_lines(temp_setup_path, rewrite_result.ok_ref().lines))
-          {
-            std::cerr << "Failed to write updated setup file " << temp_setup_path << "\n";
-            std::filesystem::remove(temp_surface_path, ec);
-            std::filesystem::remove(temp_setup_path, ec);
-            exit(1);
-          }
-
-          if(!analysis.axis_aligned_to_origin)
-          {
-            std::filesystem::rename(temp_surface_path, absolute_path, ec);
-            if(ec)
+            if(!write_text_lines(temp_setup_path, rewrite_result->lines))
             {
-              std::cerr << "Failed to replace surface mesh " << absolute_path << ": " << ec.message() << "\n";
+              std::cerr << "Failed to write updated setup file " << temp_setup_path << "\n";
               std::filesystem::remove(temp_surface_path, ec);
               std::filesystem::remove(temp_setup_path, ec);
               exit(1);
             }
-          }
 
-          std::filesystem::rename(temp_setup_path, setup_path, ec);
-          if(ec)
-          {
-            std::cerr << "Failed to replace setup file " << setup_path << ": " << ec.message() << "\n";
-            std::filesystem::remove(temp_setup_path, ec);
-            exit(1);
+            if(!analysis.axis_aligned_to_origin)
+            {
+              std::filesystem::rename(temp_surface_path, absolute_path, ec);
+              if(ec)
+              {
+                std::cerr << "Failed to replace surface mesh " << absolute_path << ": " << ec.message() << "\n";
+                std::filesystem::remove(temp_surface_path, ec);
+                std::filesystem::remove(temp_setup_path, ec);
+                exit(1);
+              }
+            }
+
+            std::filesystem::rename(temp_setup_path, setup_path, ec);
+            if(ec)
+            {
+              std::cerr << "Failed to replace setup file " << setup_path << ": " << ec.message() << "\n";
+              std::filesystem::remove(temp_setup_path, ec);
+              exit(1);
+            }
           }
 
           if(analysis.axis_aligned_to_origin)
@@ -1938,12 +1939,19 @@ namespace MeshHexerCLI
                       << "\n";
             std::cout << Markdown::li("surface backup: " + backup_surface_path.string()) << "\n";
           }
-          std::cout << Markdown::li("setup backup: " + backup_setup_path.string()) << "\n";
-          std::cout << Markdown::li(
-                         "setup.e3d updates: shifted " + std::to_string(rewrite_result.ok_ref().shifted_centers) +
-                         " center entries and " + std::to_string(rewrite_result.ok_ref().shifted_midpoints) +
-                         " midpoint entries; preprocessing section refreshed")
-                    << "\n";
+          if(!setup_requires_update)
+          {
+            std::cout << Markdown::li("setup.e3d preprocessing section already correct; setup file left unchanged") << "\n";
+          }
+          else
+          {
+            std::cout << Markdown::li("setup backup: " + backup_setup_path.string()) << "\n";
+            std::cout << Markdown::li(
+                           "setup.e3d updates: shifted " + std::to_string(rewrite_result->shifted_centers) +
+                           " center entries and " + std::to_string(rewrite_result->shifted_midpoints) +
+                           " midpoint entries; preprocessing section refreshed")
+                      << "\n";
+          }
         }
 
         std::cout << "\n";
@@ -2021,144 +2029,6 @@ namespace MeshHexerCLI
                     << MeshHexer::DegenerateTriangleWarning::name << "]\n";
         }
       }
-    }
-
-    if(gparams.command == "repair")
-    {
-      MeshHexer::Result<RepairParameters, std::string> parse_result = parse_repair_args(argc, &argv);
-
-      if(parse_result.is_err())
-      {
-        std::cerr << "Parameter parsing for command 'repair' failed with: " << parse_result.err_ref() << "\n";
-        exit(1);
-      }
-
-      RepairParameters params = parse_result.ok_value();
-
-      if(params.show_help)
-      {
-        std::cout << repair_usage;
-        exit(0);
-      }
-
-      MeshHexer::Result<MeshHexer::Mesh, std::string> mesh_result = load_editable_mesh(params.mesh_file);
-      if(mesh_result.is_err())
-      {
-        std::cerr << "Reading mesh failed with error: " << mesh_result.err_ref() << "\n";
-        exit(1);
-      }
-
-      MeshHexer::Mesh mesh = std::move(mesh_result).take_ok();
-
-      std::vector<MeshHexer::FaceIndex> small_area_faces =
-        MeshHexer::faces_with_small_area(mesh, SMALL_FACE_RELATIVE_AREA);
-      for(MeshHexer::FaceIndex f : small_area_faces)
-      {
-        mesh.remove_face(f);
-      }
-      mesh.collect_garbage();
-
-      std::size_t removed_faces = small_area_faces.size();
-      std::size_t removed_vertices = PMP::remove_isolated_vertices(mesh);
-      mesh.collect_garbage();
-
-      std::filesystem::path output = params.output.value_or(default_repair_path(params.mesh_file));
-      if(!output.has_extension())
-      {
-        output.replace_extension(".off");
-      }
-
-      if(!CGAL::IO::write_polygon_mesh(output.string(), mesh))
-      {
-        std::cerr << "Failed to write repaired mesh to " << output << "\n";
-        exit(1);
-      }
-
-      std::cout << "Wrote repaired mesh to " << output << " (removed " << removed_faces << " near-zero-area faces, "
-                << removed_vertices << " isolated vertices)\n";
-      exit(0);
-    }
-
-    if(gparams.command == "precheck")
-    {
-      MeshHexer::Result<PrecheckParameters, std::string> parse_result = parse_precheck_args(argc, &argv);
-
-      if(parse_result.is_err())
-      {
-        std::cerr << "Parameter parsing for command 'precheck' failed with: " << parse_result.err_ref() << "\n";
-        exit(1);
-      }
-
-      PrecheckParameters params = parse_result.ok_value();
-
-      if(params.show_help)
-      {
-        std::cout << precheck_usage;
-        exit(0);
-      }
-
-      MeshHexer::Result<MeshHexer::SurfaceMesh, std::string> result = MeshHexer::load_from_file(params.mesh_file, true);
-      if(result.is_err())
-      {
-        std::cout << "Reading mesh failed with error: " << result.err_ref() << "\n";
-        exit(1);
-      }
-
-      MeshHexer::SurfaceMesh mesh = std::move(result).take_ok();
-      std::vector<std::size_t> invalid_faces = mesh.faces_with_short_normals(params.min_normal_length);
-      std::vector<std::size_t> small_area_faces = mesh.faces_with_small_area(SMALL_FACE_RELATIVE_AREA);
-
-      // Merge explicit degeneracy warnings into small-area set to cover exact collinear cases.
-      MeshHexer::MeshWarnings warnings = mesh.warnings();
-      std::unordered_set<std::size_t> small_face_set(small_area_faces.begin(), small_area_faces.end());
-      for(const MeshHexer::DegenerateTriangleWarning& warning : warnings.degenerate_triangles)
-      {
-        if(small_face_set.insert(warning.idx).second)
-        {
-          small_area_faces.push_back(warning.idx);
-        }
-      }
-
-      if(invalid_faces.empty() && small_area_faces.empty())
-      {
-        std::cout << "Mesh passed: all centroid normals are >= " << params.min_normal_length
-                  << " and no near-zero-area triangles were found.\n";
-        exit(0);
-      }
-
-      if(!invalid_faces.empty())
-      {
-        std::cout << invalid_faces.size() << " face(s) have centroid normals shorter than " << params.min_normal_length
-                  << " and will make min-gap abort.\n";
-
-        std::size_t limit = std::min(invalid_faces.size(), params.max_report);
-        for(std::size_t i = 0; i < limit; ++i)
-        {
-          std::cout << "  Face " << invalid_faces[i] << "\n";
-        }
-
-        if(invalid_faces.size() > limit)
-        {
-          std::cout << "  ... " << (invalid_faces.size() - limit) << " more faces not listed\n";
-        }
-      }
-
-      if(!small_area_faces.empty())
-      {
-        std::cout << small_area_faces.size()
-                  << " triangle(s) have near-zero area (including degenerate triangles) and violate CGAL assumptions.\n";
-        std::size_t limit = std::min<std::size_t>(small_area_faces.size(), params.max_report);
-        for(std::size_t i = 0; i < limit; ++i)
-        {
-          std::cout << "  Face " << small_area_faces[i] << "\n";
-        }
-        if(small_area_faces.size() > limit)
-        {
-          std::cout << "  ... " << (small_area_faces.size() - limit) << " more faces not listed\n";
-        }
-      }
-
-      exit(2);
     }
 
     return 0;

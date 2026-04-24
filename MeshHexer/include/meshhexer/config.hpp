@@ -22,6 +22,7 @@ namespace MeshHexer
     double monitor_histogram_eps = 1.0e-12;
     double histogram_target_fraction = 0.001;
     double histogram_min_fraction_threshold = 0.001;
+    double histogram_min_fraction_connected_threshold = 0.0001;
     double histogram_max_fraction_threshold = 0.80;
     std::size_t max_histogram_span_bins = 3;
     std::size_t min_histogram_span_bins = 1;

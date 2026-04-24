@@ -204,13 +204,6 @@ namespace MeshHexer
      * \returns Indices of faces violating the threshold
      */
     std::vector<std::size_t> faces_with_short_normals(double min_length = 1e-12);
-    /**
-     * \brief Faces whose geometric area is below a relative threshold.
-     *
-     * \param[in] relative_threshold Relative area threshold with respect to mesh size squared.
-     * \returns Indices of faces violating the threshold
-     */
-    std::vector<std::size_t> faces_with_small_area(double relative_threshold = 1e-20) const;
 
     /**
      * \brief Analyze a round geometry (full/hollow cylinder) using mesh and inflow metadata.
@@ -234,6 +227,13 @@ namespace MeshHexer
      * \param[in] dz Shift in z direction
      */
     void translate(double dx, double dy, double dz);
+
+    /**
+     * \brief Write the current min-gap monitor histogram to a stream.
+     *
+     * Available after min-gap computations have prepared the histogram data.
+     */
+    void write_monitor_histogram(std::ostream& stream) const;
 
     /**
      * \brief Write the surface mesh to disk

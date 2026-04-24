@@ -79,7 +79,19 @@ namespace MeshHexer
     double upper;
     double area;
   };
+  struct MonitorHistogramComponentStats
+  {
+    std::size_t collections = 0;
+    double connected_area = 0.0;
+    double isolated_area = 0.0;
+    double max_component_area = 0.0;
+  };
   std::vector<MonitorHistogramBin> monitor_histogram(Mesh& mesh, double min_gap_diameter);
+  std::vector<MonitorHistogramComponentStats> monitor_histogram_component_counts(
+    Mesh& mesh,
+    const std::vector<MonitorHistogramBin>& bins,
+    double min_gap_diameter,
+    double min_component_area_fraction);
   double adjusted_min_gap_from_histogram(const std::vector<MonitorHistogramBin>& bins, double min_gap_diameter);
   std::pair<std::size_t, std::size_t> monitor_histogram_min_max_indices(const std::vector<MonitorHistogramBin>& bins);
   /// Faces whose centroid normals fall below the requested magnitude

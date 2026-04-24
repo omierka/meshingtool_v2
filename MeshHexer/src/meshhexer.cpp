@@ -187,7 +187,9 @@ namespace MeshHexer
     std::optional<AABBTree> _aabb_tree;
 
     std::vector<MonitorHistogramBin> _monitor_histogram;
+    std::vector<MonitorHistogramComponentStats> _monitor_histogram_component_counts;
     double _monitor_histogram_total_area = 0.0;
+    double _surface_total_area = 0.0;
     bool _monitor_histogram_ready = false;
     std::size_t _monitor_hist_min_index = 0;
     std::size_t _monitor_hist_max_index = 0;
@@ -249,9 +251,6 @@ namespace MeshHexer
     /// \copydoc SurfaceMesh::faces_with_short_normals()
     std::vector<std::size_t> faces_with_short_normals(double min_length);
 
-    /// \copydoc SurfaceMesh::faces_with_small_area()
-    std::vector<std::size_t> faces_with_small_area(double relative_threshold) const;
-
     /// \copydoc SurfaceMesh::round_geometry_analysis()
     Result<RoundGeometryAnalysisResult, std::string> round_geometry_analysis(
       const std::vector<RoundGeometryInflow>& inflows,
@@ -259,6 +258,9 @@ namespace MeshHexer
 
     /// \copydoc SurfaceMesh::translate()
     void translate(double dx, double dy, double dz);
+
+    /// \copydoc SurfaceMesh::write_monitor_histogram()
+    void write_monitor_histogram(std::ostream& stream) const;
 
     /// \copydoc SurfaceMesh::write_to_file()
     Result<void, std::string> write_to_file(const std::string& filename);
@@ -341,6 +343,11 @@ namespace MeshHexer
 
     monitor_distances(_mesh);
     _monitor_histogram = monitor_histogram(_mesh, gap.diameter);
+    _monitor_histogram_component_counts = monitor_histogram_component_counts(
+      _mesh,
+      _monitor_histogram,
+      gap.diameter,
+      min_gap_config().histogram_min_fraction_connected_threshold);
     _monitor_hist_min_index = 0;
     _monitor_hist_max_index = 0;
     if(!_monitor_histogram.empty())
@@ -353,6 +360,11 @@ namespace MeshHexer
     for(const MonitorHistogramBin& bin : _monitor_histogram)
     {
       _monitor_histogram_total_area += bin.area;
+    }
+    _surface_total_area = 0.0;
+    for(FaceIndex f : _mesh.faces())
+    {
+      _surface_total_area += PMP::face_area(f, _mesh);
     }
     _monitor_histogram_ready = true;
 
@@ -452,13 +464,28 @@ namespace MeshHexer
       return;
     }
 
+    write_monitor_histogram(out);
+  }
+
+  void SurfaceMesh::SurfaceMeshImpl::write_monitor_histogram(std::ostream& out) const
+  {
+    if(!_monitor_histogram_ready)
+    {
+      return;
+    }
+
     const int width_label = 8;
     const int width_start = 18;
     const int width_end = 18;
     const int width_area = 18;
     const int width_percent = 14;
+    const int width_components = 14;
+    const int width_connected = 16;
+    const int width_isolated = 16;
+    const int width_max_component = 18;
 
-    const int total_width = width_label + width_start + width_end + width_area + width_percent;
+    const int total_width = width_label + width_start + width_end + width_area + width_percent +
+      width_components + width_connected + width_isolated + width_max_component;
 
     std::size_t marked_min = _monitor_hist_min_index;
     std::size_t marked_max = _monitor_hist_max_index;
@@ -477,6 +504,10 @@ namespace MeshHexer
         << std::right << std::setw(width_end) << "Bin End"
         << std::right << std::setw(width_area) << "Area"
         << std::right << std::setw(width_percent) << "Percentage"
+        << std::right << std::setw(width_components) << "Collections"
+        << std::right << std::setw(width_connected) << "Connected %"
+        << std::right << std::setw(width_isolated) << "Isolated %"
+        << std::right << std::setw(width_max_component) << "Max Component %"
         << "\n";
 
     out << std::string(total_width, '-') << "\n";
@@ -494,6 +525,16 @@ namespace MeshHexer
       if(_monitor_histogram_total_area > 0.0)
       {
         percentage = (bin.area / _monitor_histogram_total_area) * 100.0;
+      }
+      double connected_percentage = 0.0;
+      double isolated_percentage = 0.0;
+      double max_component_percentage = 0.0;
+      if(i < _monitor_histogram_component_counts.size() && _monitor_histogram_total_area > 0.0)
+      {
+        connected_percentage = (_monitor_histogram_component_counts[i].connected_area / _monitor_histogram_total_area) * 100.0;
+        isolated_percentage = (_monitor_histogram_component_counts[i].isolated_area / _monitor_histogram_total_area) * 100.0;
+        max_component_percentage =
+          (_monitor_histogram_component_counts[i].max_component_area / _monitor_histogram_total_area) * 100.0;
       }
 
       std::string label;
@@ -514,7 +555,13 @@ namespace MeshHexer
           << std::right << std::setw(width_start) << format_value(bin.lower, 6)
           << std::right << std::setw(width_end) << format_value(bin.upper, 6)
           << std::right << std::setw(width_area) << format_value(bin.area, 6)
-          << std::right << std::setw(width_percent - 1) << format_value(percentage, 2) << "%\n";
+          << std::right << std::setw(width_percent - 1) << format_value(percentage, 2) << "%"
+          << std::right << std::setw(width_components)
+          << ((i < _monitor_histogram_component_counts.size()) ? std::to_string(_monitor_histogram_component_counts[i].collections) : "0")
+          << std::right << std::setw(width_connected - 1) << format_value(connected_percentage, 2) << "%"
+          << std::right << std::setw(width_isolated - 1) << format_value(isolated_percentage, 2) << "%"
+          << std::right << std::setw(width_max_component - 1) << format_value(max_component_percentage, 2) << "%"
+          << "\n";
     }
   }
 
@@ -597,18 +644,6 @@ namespace MeshHexer
       indices.push_back(static_cast<std::size_t>(f));
     }
 
-    return indices;
-  }
-
-  std::vector<std::size_t> SurfaceMesh::SurfaceMeshImpl::faces_with_small_area(double relative_threshold) const
-  {
-    std::vector<FaceIndex> small_faces = MeshHexer::faces_with_small_area(_mesh, relative_threshold);
-    std::vector<std::size_t> indices;
-    indices.reserve(small_faces.size());
-    for(FaceIndex f : small_faces)
-    {
-      indices.push_back(static_cast<std::size_t>(f));
-    }
     return indices;
   }
 
@@ -873,11 +908,6 @@ namespace MeshHexer
     return impl->faces_with_short_normals(min_length);
   }
 
-  std::vector<std::size_t> SurfaceMesh::faces_with_small_area(double relative_threshold) const
-  {
-    return impl->faces_with_small_area(relative_threshold);
-  }
-
   Result<RoundGeometryAnalysisResult, std::string> SurfaceMesh::round_geometry_analysis(
     const std::vector<RoundGeometryInflow>& inflows,
     const RoundGeometryAnalysisConfig& config)
@@ -888,6 +918,11 @@ namespace MeshHexer
   void SurfaceMesh::translate(double dx, double dy, double dz)
   {
     impl->translate(dx, dy, dz);
+  }
+
+  void SurfaceMesh::write_monitor_histogram(std::ostream& stream) const
+  {
+    impl->write_monitor_histogram(stream);
   }
 
   Result<SurfaceMesh, std::string> load_from_file(const std::string& filename, bool triangulate)

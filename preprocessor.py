@@ -33,12 +33,13 @@ MODULE_BOOTSTRAP = (
 STAGE_LEGEND = """\
 Stage legend:
 [0] start
-[1] mindist
-[2] coarse mesher
-[3] mesh filter
-[4] monitor function
-[5] mesh refinement
-[6] fine mesh filter"""
+[1] preprocessing configuration
+[2] mindist
+[3] coarse mesher
+[4] mesh filter
+[5] monitor function
+[6] mesh refinement
+[7] fine mesh filter"""
 
 
 @dataclass
@@ -198,20 +199,20 @@ class CaseRunner:
         self.monitor_summary_file.unlink(missing_ok=True)
         self.monitor_summary_vol_file.unlink(missing_ok=True)
 
-    def _mingap_repair_hint(self) -> str:
-        mesh_path = self.folder / "surface.off"
-        cli_path = Path(self._cmd_path("meshhexer-cli"))
-        cli_display = cli_path.name
+    def _configure_case_for_preprocessing(self) -> None:
         try:
-            cli_display = f"./{cli_path.relative_to(self.script_dir)}"
-        except ValueError:
-            cli_display = str(cli_path)
-        return (
-            "If this failure is caused by the OFF triangulation, consider checking "
-            "and repairing it with:\n"
-            f"  {cli_display} precheck {mesh_path}\n"
-            f"  {cli_display} repair {mesh_path}"
-        )
+            self._run_command(
+                (
+                    self._cmd_path("meshhexer-cli"),
+                    "report",
+                    "--configure-case-for-preprocessing",
+                    str(self.folder),
+                )
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "meshhexer-cli report --configure-case-for-preprocessing failed."
+            ) from exc
 
     def _compute_initial_parameters(self) -> None:
         try:
@@ -227,19 +228,17 @@ class CaseRunner:
             )
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
-                "meshhexer-cli min-gap failed. "
-                f"{self._mingap_repair_hint()}"
+                "meshhexer-cli min-gap failed."
             ) from exc
         if output is None:
             raise RuntimeError(
-                "meshhexer-cli min-gap produced no output. "
-                f"{self._mingap_repair_hint()}"
+                "meshhexer-cli min-gap produced no output."
             )
         parts = output.split()
         if len(parts) < 3:
             raise RuntimeError(
                 "Unable to parse meshhexer-cli min-gap output: "
-                f"'{output.strip()}'. {self._mingap_repair_hint()}"
+                f"'{output.strip()}'."
             )
         mindist_raw, span_raw, coarse_raw = parts[:3]
         self.mindist_value = float(mindist_raw)
@@ -354,7 +353,7 @@ class CaseRunner:
             )
         )
 
-        self._record_stage(2)
+        self._record_stage(3)
         self._run_command(
             (
                 "mpirun",
@@ -385,7 +384,7 @@ class CaseRunner:
             coarse_mesh.unlink()
         filtered_mesh.rename(coarse_dir / "Mesh.tri")
 
-        self._record_stage(3)
+        self._record_stage(4)
         self._run_command(
             (
                 "mpirun",
@@ -406,7 +405,7 @@ class CaseRunner:
         mesh_names_file = self.script_dir / "mesh_names.offs"
         mesh_names_file.write_text(f"1\n{self.folder / 'surface.off'}\n", encoding="utf-8")
 
-        self._record_stage(4)
+        self._record_stage(5)
         self._run_command(
             (
                 self._cmd_path("meshref"),
@@ -417,7 +416,7 @@ class CaseRunner:
             )
         )
 
-        self._record_stage(5)
+        self._record_stage(6)
         try:
             span_int = int(float(self.span_value))
         except ValueError as exc:
@@ -445,7 +444,7 @@ class CaseRunner:
                 str(self.folder),
             )
         )
-        self._record_stage(6)
+        self._record_stage(7)
 
     def _read_monitor_first_bin_percent(self, path: Path) -> Optional[float]:
         if not path.exists():
@@ -497,8 +496,10 @@ class CaseRunner:
         self._ensure_case_exists()
         self._remove_monitor_files()
         self._record_stage(0)
-        self._compute_initial_parameters()
+        self._configure_case_for_preprocessing()
         self._record_stage(1)
+        self._compute_initial_parameters()
+        self._record_stage(2)
         assert self.mindist_value is not None
         self._run_mesh_workflow(str(self.mindist_value))
         self._maybe_apply_monitor_correction()
@@ -675,7 +676,7 @@ def run_all_command(args: argparse.Namespace, script_dir: Path) -> None:
     time_column_width = len("9999.999 [s]")
     mindist_column_width = len("mindist=999.999")
     nel_column_width = len("99,999,999")
-    iteration_pad_len = len("*[2][3][4][5][6]")
+    iteration_pad_len = len("*[3][4][5][6][7]")
 
     for case_path, case_name in zip(cases, case_names):
         print(f"[{case_name:<{name_width}}]:", end="", flush=True)

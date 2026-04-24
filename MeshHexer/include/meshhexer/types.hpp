@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iostream>
 #include <optional>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -551,6 +552,7 @@ namespace MeshHexer
     double preprocessing_sel_x = 1.0;
     double preprocessing_sel_y = 1.0;
     double preprocessing_sel_z = 1.0;
+    std::string default_geometry_type = "BOX";
   };
 
   struct RoundGeometryAnalysisResult

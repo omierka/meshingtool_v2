@@ -90,23 +90,14 @@ Most thresholds mentioned above are hard-coded today (0.1 %, 66 %, 4°…). When
 
 Please coordinate changes to the console output (`mindist span coarseMeshSize`) with users of `runner.sh` to keep the coarse-mesh derivation consistent.
 
-## 8. Prechecking and Repairing Meshes
+## 8. Handling Degenerate Faces
 
-The min-gap pipeline terminates early when it encounters invalid triangles (zero-length centroid normals, degenerate or near-zero-area faces). Before running Section 1 make sure the input mesh passes:
+The min-gap pipeline now filters problematic triangles from the internal analysis mesh instead of exposing separate `precheck` and `repair` commands.
 
-```
-# Exit status 0 means “safe for min-gap”
-meshhexer-cli precheck <mesh/surface.off>
-```
-
-`precheck` lists up to `--max-report` problematic faces and exits with code 2 if any are found, so runners can gate their workflows accordingly.
-
-If `precheck` reports degenerate/near-zero-area faces you can repair the surface directly:
+When such faces are present, the CLI reports this on `stderr`:
 
 ```
-# Writes mesh_repaired.off unless --output is given
-meshhexer-cli repair <mesh/surface.off>
-meshhexer-cli precheck <mesh_repaired.off>   # should now pass
+Min-gap analysis filter: X near-zero-area faces, Y faces with collapsed centroid normals excluded from analysis: Z
 ```
 
-`repair` removes every flagged face, deletes isolated vertices, and triangulates the remaining surface so the cleaned mesh can be fed back into the min-gap workflow.
+The original `surface.off` remains unchanged. Only the temporary analysis mesh used for the ray-cast/intersection workflow excludes those faces.

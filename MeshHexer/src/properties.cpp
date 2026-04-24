@@ -731,6 +731,130 @@ namespace MeshHexer
     return result;
   }
 
+  std::vector<MonitorHistogramComponentStats> monitor_histogram_component_counts(
+    Mesh& mesh,
+    const std::vector<MonitorHistogramBin>& bins,
+    double min_gap_diameter,
+    double min_component_area_fraction)
+  {
+    std::vector<MonitorHistogramComponentStats> counts(bins.size());
+    if(bins.empty())
+    {
+      return counts;
+    }
+
+    auto maybe_monitor = mesh.property_map<FaceIndex, double>("f:Monitor");
+    if(!maybe_monitor.has_value() || min_gap_diameter <= 0.0)
+    {
+      return counts;
+    }
+
+    Mesh::Property_map<FaceIndex, double> monitor = maybe_monitor.value();
+    const double eps = min_gap_config().monitor_histogram_eps;
+    double total_surface_area = 0.0;
+    for(FaceIndex f : mesh.faces())
+    {
+      total_surface_area += PMP::face_area(f, mesh);
+    }
+    if(total_surface_area <= 0.0)
+    {
+      return counts;
+    }
+    const double min_component_area = std::max(0.0, min_component_area_fraction) * total_surface_area;
+    std::vector<char> eligible(mesh.num_faces(), 0);
+    std::vector<char> visited(mesh.num_faces(), 0);
+    std::vector<FaceIndex> stack;
+
+    for(std::size_t bin_idx = 0; bin_idx < bins.size(); ++bin_idx)
+    {
+      const double lower_limit = bins[bin_idx].lower;
+      const double upper_limit = bins[bin_idx].upper + eps;
+      std::fill(eligible.begin(), eligible.end(), 0);
+      std::fill(visited.begin(), visited.end(), 0);
+
+      for(FaceIndex f : mesh.faces())
+      {
+        const std::size_t id = f.idx();
+        if(id >= eligible.size())
+        {
+          continue;
+        }
+        const double value = monitor[f];
+        const bool last = (bin_idx + 1 == bins.size());
+        if((value >= lower_limit && value < bins[bin_idx].upper) || (last && value >= lower_limit && value <= upper_limit))
+        {
+          eligible[id] = 1;
+        }
+      }
+
+      std::size_t qualifying_components = 0;
+      double connected_area = 0.0;
+      double isolated_area = 0.0;
+      double max_component_area = 0.0;
+      for(FaceIndex start : mesh.faces())
+      {
+        const std::size_t start_id = start.idx();
+        if(start_id >= eligible.size() || !eligible[start_id] || visited[start_id])
+        {
+          continue;
+        }
+
+        double component_area = 0.0;
+        stack.clear();
+        stack.push_back(start);
+        visited[start_id] = 1;
+
+        while(!stack.empty())
+        {
+          const FaceIndex current = stack.back();
+          stack.pop_back();
+          component_area += PMP::face_area(current, mesh);
+
+          for(HalfedgeIndex h : mesh.halfedges_around_face(mesh.halfedge(current)))
+          {
+            const HalfedgeIndex opposite = mesh.opposite(h);
+            if(opposite == Mesh::null_halfedge() || mesh.is_border(opposite))
+            {
+              continue;
+            }
+            const FaceIndex neighbor = mesh.face(opposite);
+            if(neighbor == Mesh::null_face())
+            {
+              continue;
+            }
+
+            const std::size_t neighbor_id = neighbor.idx();
+            if(neighbor_id >= eligible.size() || !eligible[neighbor_id] || visited[neighbor_id])
+            {
+              continue;
+            }
+
+            visited[neighbor_id] = 1;
+            stack.push_back(neighbor);
+          }
+        }
+
+        if(component_area >= min_component_area)
+        {
+          ++qualifying_components;
+          connected_area += component_area;
+          max_component_area = std::max(max_component_area, component_area);
+        }
+        else
+        {
+          isolated_area += component_area;
+        }
+      }
+
+      counts[bin_idx].collections = qualifying_components;
+      counts[bin_idx].connected_area = connected_area;
+      counts[bin_idx].isolated_area = isolated_area;
+      counts[bin_idx].max_component_area = max_component_area;
+    }
+
+    return counts;
+  }
+
   double adjusted_min_gap_from_histogram(const std::vector<MonitorHistogramBin>& bins, double min_gap_diameter)
   {
     if(bins.empty())
