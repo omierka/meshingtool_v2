@@ -213,9 +213,32 @@ namespace MeshHexer
     std::vector<std::size_t> faces_with_small_area(double relative_threshold = 1e-20) const;
 
     /**
+     * \brief Analyze a round geometry (full/hollow cylinder) using mesh and inflow metadata.
+     *
+     * Estimates xy axis offset from a z-max slice, derives inner/outer diameters from the full triangulation,
+     * and reconstructs physical z extents by compensating artificial inlet/outlet extrusions.
+     *
+     * \param[in] inflows Parsed inflow descriptions from setup.e3d
+     * \param[in] config  Analysis thresholds
+     * \returns Analysis result or an error message
+     */
+    Result<RoundGeometryAnalysisResult, std::string> round_geometry_analysis(
+      const std::vector<RoundGeometryInflow>& inflows,
+      const RoundGeometryAnalysisConfig& config = {});
+
+    /**
+     * \brief Translate all mesh vertices by the given offset.
+     *
+     * \param[in] dx Shift in x direction
+     * \param[in] dy Shift in y direction
+     * \param[in] dz Shift in z direction
+     */
+    void translate(double dx, double dy, double dz);
+
+    /**
      * \brief Write the surface mesh to disk
      *
-     * \param[in] filename Filename to write to. Must end in .ply or .vtu
+     * \param[in] filename Filename to write to. Must end in .off, .ply or .vtu
      *
      * Writes the surface mesh to disk as a .ply or .vtu file. The written file
      * contains mesh properties that have been calculated as intermediate results,

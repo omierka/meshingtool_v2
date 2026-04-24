@@ -72,6 +72,7 @@ class CaseRunner:
         base_env: Dict[str, str],
         driver_config: DriverConfig,
         stage_callback: Optional[Callable[[str, str], None]] = None,
+        protocol_file: Optional[Path] = None,
     ) -> None:
         self.script_dir = script_dir
         self.folder = folder if folder.is_absolute() else script_dir / folder
@@ -81,6 +82,7 @@ class CaseRunner:
         self.env = dict(base_env)
         self.stage_callback = stage_callback
         self.monitor_zero_bin_threshold_percent = driver_config.monitor_zero_bin_threshold_percent
+        self.protocol_file = protocol_file
 
         self.monitor_summary_file = self.folder / "monitor_summary.txt"
         self.monitor_summary_vol_file = self.folder / "monitor_summary_volumetric.txt"
@@ -98,6 +100,7 @@ class CaseRunner:
     def _record_stage(self, label: int) -> None:
         marker = f"[{label}]"
         self.stage_events.append(marker)
+        self._append_protocol_line(marker)
         if self.stage_callback:
             self.stage_callback("stage", marker)
         elif self.silent:
@@ -106,16 +109,29 @@ class CaseRunner:
     def _record_iteration_marker(self) -> None:
         self.iteration_marker_used = True
         self.stage_events.append("*")
+        self._append_protocol_line("*")
         if self.stage_callback:
             self.stage_callback("iteration", "*")
         elif self.silent:
             print("*")
 
     def _emit_info(self, value: str) -> None:
+        self._append_protocol_line(value)
         if self.stage_callback:
             self.stage_callback("info", value)
             return
         print(value)
+
+    def _append_protocol(self, text: str) -> None:
+        if self.protocol_file is None or not text:
+            return
+        with self.protocol_file.open("a", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def _append_protocol_line(self, line: str) -> None:
+        if not line:
+            return
+        self._append_protocol(f"{line}\n")
 
     def _run_command(
         self,
@@ -123,17 +139,32 @@ class CaseRunner:
         *,
         capture_output: bool = False,
     ) -> Optional[str]:
+        command = list(map(str, args))
         stdout = subprocess.PIPE if capture_output else None
-        if self.silent and not capture_output:
+        stderr = None
+        if self.protocol_file is not None:
+            stdout = subprocess.PIPE
+            stderr = subprocess.PIPE
+        elif self.silent and not capture_output:
             stdout = subprocess.DEVNULL
-        result = subprocess.run(
-            list(map(str, args)),
-            cwd=self.script_dir,
-            env=self.env,
-            stdout=stdout,
-            check=True,
-            text=True,
-        )
+
+        self._append_protocol_line(f"$ {' '.join(command)}")
+        try:
+            result = subprocess.run(
+                command,
+                cwd=self.script_dir,
+                env=self.env,
+                stdout=stdout,
+                stderr=stderr,
+                check=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            self._append_protocol(exc.stdout or "")
+            self._append_protocol(exc.stderr or "")
+            raise
+        self._append_protocol(result.stdout or "")
+        self._append_protocol(result.stderr or "")
         return result.stdout if capture_output else None
 
     def _ensure_case_exists(self) -> None:
@@ -155,6 +186,7 @@ class CaseRunner:
             "hex_intersection_intersections.pvtu",
             "hex_intersection_tets.pvtu",
             "hex_mesh.pvtu",
+            "preprocessing_protocol.txt",
             "size_distribution_histogram.txt",
         )
         for file_name in extra_files:
@@ -166,23 +198,48 @@ class CaseRunner:
         self.monitor_summary_file.unlink(missing_ok=True)
         self.monitor_summary_vol_file.unlink(missing_ok=True)
 
-    def _compute_initial_parameters(self) -> None:
-        output = self._run_command(
-            (
-                self._cmd_path("meshhexer-cli"),
-                "--checkpoint-path",
-                str(self.folder / "MINGAP.vtu"),
-                "min-gap",
-                str(self.folder / "surface.off"),
-            ),
-            capture_output=True,
+    def _mingap_repair_hint(self) -> str:
+        mesh_path = self.folder / "surface.off"
+        cli_path = Path(self._cmd_path("meshhexer-cli"))
+        cli_display = cli_path.name
+        try:
+            cli_display = f"./{cli_path.relative_to(self.script_dir)}"
+        except ValueError:
+            cli_display = str(cli_path)
+        return (
+            "If this failure is caused by the OFF triangulation, consider checking "
+            "and repairing it with:\n"
+            f"  {cli_display} precheck {mesh_path}\n"
+            f"  {cli_display} repair {mesh_path}"
         )
+
+    def _compute_initial_parameters(self) -> None:
+        try:
+            output = self._run_command(
+                (
+                    self._cmd_path("meshhexer-cli"),
+                    "--checkpoint-path",
+                    str(self.folder / "MINGAP.vtu"),
+                    "min-gap",
+                    str(self.folder / "surface.off"),
+                ),
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "meshhexer-cli min-gap failed. "
+                f"{self._mingap_repair_hint()}"
+            ) from exc
         if output is None:
-            raise RuntimeError("meshhexer-cli produced no output")
+            raise RuntimeError(
+                "meshhexer-cli min-gap produced no output. "
+                f"{self._mingap_repair_hint()}"
+            )
         parts = output.split()
         if len(parts) < 3:
             raise RuntimeError(
-                f"Unable to parse meshhexer-cli output: '{output.strip()}'"
+                "Unable to parse meshhexer-cli min-gap output: "
+                f"'{output.strip()}'. {self._mingap_repair_hint()}"
             )
         mindist_raw, span_raw, coarse_raw = parts[:3]
         self.mindist_value = float(mindist_raw)
@@ -210,10 +267,10 @@ class CaseRunner:
                 return None
         except configparser.Error:
             return None
-        section = "E3DGeometryData/Preprocessing"
+        section = "E3DGeometryData/Machine"
         if not parser.has_section(section):
             return None
-        raw_value = parser.get(section, "MinGap", fallback=None)
+        raw_value = parser.get(section, "UserDefinedMinGap", fallback=None)
         if raw_value is None:
             return None
         raw_value = raw_value.strip()
@@ -223,7 +280,7 @@ class CaseRunner:
             return float(raw_value)
         except ValueError:
             self._emit_info(
-                f"Warning: invalid MinGap value '{raw_value}' in setup.e3d; ignoring."
+                f"Warning: invalid UserDefinedMinGap value '{raw_value}' in setup.e3d; ignoring."
             )
             return None
 
@@ -567,6 +624,7 @@ def cleanup_case_pngs(case_path: Path) -> None:
         "hex_intersection_intersections.pvtu",
         "hex_intersection_tets.pvtu",
         "hex_mesh.pvtu",
+        "preprocessing_protocol.txt",
     )
     for file_name in extra_files:
         (case_path / file_name).unlink(missing_ok=True)
@@ -621,6 +679,8 @@ def run_all_command(args: argparse.Namespace, script_dir: Path) -> None:
 
     for case_path, case_name in zip(cases, case_names):
         print(f"[{case_name:<{name_width}}]:", end="", flush=True)
+        protocol_file = case_path / "preprocessing_protocol.txt"
+        protocol_file.write_text("", encoding="utf-8")
 
         def stage_printer(event_type: str, payload: str) -> None:
             if event_type in {"stage", "iteration"}:
@@ -635,17 +695,22 @@ def run_all_command(args: argparse.Namespace, script_dir: Path) -> None:
             base_env=env,
             driver_config=driver_config,
             stage_callback=stage_printer,
+            protocol_file=protocol_file,
         )
         try:
             result = runner.run()
         except subprocess.CalledProcessError as exc:
             print()
             raise SystemExit(
-                f"Case '{case_name}' failed with exit code {exc.returncode}"
+                f"Case '{case_name}' failed with exit code {exc.returncode}. "
+                f"See '{protocol_file}' for the full protocol."
             ) from exc
         except Exception as exc:
             print()
-            raise SystemExit(f"Case '{case_name}' failed: {exc}") from exc
+            raise SystemExit(
+                f"Case '{case_name}' failed: {exc}. "
+                f"See '{protocol_file}' for the full protocol."
+            ) from exc
         if args.clean:
             print()
             cleanup_case_pngs(case_path)

@@ -2,6 +2,8 @@
 
 #include <cstddef>
 
+#include <meshhexer/types.hpp>
+
 namespace MeshHexer
 {
   struct MinGapConfig
@@ -27,4 +29,5 @@ namespace MeshHexer
   };
 
   const MinGapConfig& min_gap_config();
+  const RoundGeometryAnalysisConfig& round_geometry_analysis_config();
 } // namespace MeshHexer

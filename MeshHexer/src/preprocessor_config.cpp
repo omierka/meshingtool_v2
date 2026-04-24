@@ -71,71 +71,96 @@ namespace MeshHexer
       }
     }
 
-    MinGapConfig load_config()
+    MinGapConfig load_min_gap_config(const boost::property_tree::ptree& tree)
     {
       MinGapConfig cfg;
+      load_value(tree, "2DMeshAnalysis/MingapValidity.neighbor_diameter_ratio_flag", cfg.neighbor_diameter_ratio_flag);
+      load_value(tree, "2DMeshAnalysis/MingapValidity.neighbor_normal_angle_limit_deg", cfg.neighbor_normal_angle_limit_deg);
+      load_value(tree, "2DMeshAnalysis/MingapValidity.small_angle_limit_deg", cfg.small_angle_limit_deg);
+
+      load_value(tree, "2DMeshAnalysis/MingapScore.relative_min_search_radius", cfg.relative_min_search_radius);
+      load_value(tree, "2DMeshAnalysis/MingapScore.dihedral_angle_threshold_rad", cfg.dihedral_angle_threshold_rad);
+      load_value(tree, "2DMeshAnalysis/MingapScore.face_aspect_ratio_limit", cfg.face_aspect_ratio_limit);
+      load_value(tree, "2DMeshAnalysis/MingapScore.edge_ratio_limit", cfg.edge_ratio_limit);
+      load_value(tree, "2DMeshAnalysis/MingapScore.min_diameter_fraction", cfg.min_diameter_fraction);
+      load_value(tree, "2DMeshAnalysis/MingapScore.gap_score_threshold", cfg.gap_score_threshold);
+      load_value(tree, "2DMeshAnalysis/MingapScore.score_percentile_fallback", cfg.score_percentile_fallback);
+
+      load_value(tree, "2DMeshAnalysis/MingapDesign.monitor_histogram_base", cfg.monitor_histogram_base);
+      load_value(tree, "2DMeshAnalysis/MingapDesign.monitor_histogram_eps", cfg.monitor_histogram_eps);
+      load_value(tree, "2DMeshAnalysis/MingapDesign.histogram_target_fraction", cfg.histogram_target_fraction);
+      load_value(tree, "2DMeshAnalysis/MingapDesign.histogram_min_fraction_threshold", cfg.histogram_min_fraction_threshold);
+      load_value(tree, "2DMeshAnalysis/MingapDesign.histogram_max_fraction_threshold", cfg.histogram_max_fraction_threshold);
+
+      {
+        std::size_t parsed = cfg.max_histogram_span_bins;
+        if(auto raw = get_raw(tree, "2DMeshAnalysis/MingapDesign.max_histogram_span_bins"))
+        {
+          std::size_t temp;
+          if(parse_value(*raw, temp))
+          {
+            parsed = temp;
+          }
+        }
+        cfg.max_histogram_span_bins = parsed;
+      }
+      {
+        std::size_t parsed = cfg.min_histogram_span_bins;
+        if(auto raw = get_raw(tree, "2DMeshAnalysis/MingapDesign.min_histogram_span_bins"))
+        {
+          std::size_t temp;
+          if(parse_value(*raw, temp))
+          {
+            parsed = temp;
+          }
+        }
+        cfg.min_histogram_span_bins = parsed;
+      }
+
+      load_value(tree, "2DMeshAnalysis/MingapDesign.coarse_mesh_scaling", cfg.coarse_mesh_scaling);
+      return cfg;
+    }
+
+    RoundGeometryAnalysisConfig load_round_geometry_analysis_config(const boost::property_tree::ptree& tree)
+    {
+      RoundGeometryAnalysisConfig cfg;
+      load_value(tree, "MeshAnalysis.axis_alignment_epsilon", cfg.axis_alignment_tolerance);
+      load_value(tree, "MeshAnalysis.preprocessing_export_precision", cfg.preprocessing_export_precision);
+      load_value(tree, "MeshAnalysis.preprocessing_sel_tangential", cfg.preprocessing_sel_tangential);
+      load_value(tree, "MeshAnalysis.preprocessing_sel_radial", cfg.preprocessing_sel_radial);
+      load_value(tree, "MeshAnalysis.preprocessing_sel_axial", cfg.preprocessing_sel_axial);
+      load_value(tree, "MeshAnalysis.preprocessing_fullcylinderperiodicity", cfg.preprocessing_fullcylinder_periodicity);
+      load_value(tree, "MeshAnalysis.preprocessing_sel_x", cfg.preprocessing_sel_x);
+      load_value(tree, "MeshAnalysis.preprocessing_sel_y", cfg.preprocessing_sel_y);
+      load_value(tree, "MeshAnalysis.preprocessing_sel_z", cfg.preprocessing_sel_z);
+      return cfg;
+    }
+
+    boost::property_tree::ptree load_tree()
+    {
       const auto path = locate_config_file();
+      boost::property_tree::ptree tree;
       try
       {
-        boost::property_tree::ptree tree;
         boost::property_tree::ini_parser::read_ini(path.string(), tree);
-
-        load_value(tree, "2DMeshAnalysis/MingapValidity.neighbor_diameter_ratio_flag", cfg.neighbor_diameter_ratio_flag);
-        load_value(tree, "2DMeshAnalysis/MingapValidity.neighbor_normal_angle_limit_deg", cfg.neighbor_normal_angle_limit_deg);
-        load_value(tree, "2DMeshAnalysis/MingapValidity.small_angle_limit_deg", cfg.small_angle_limit_deg);
-
-        load_value(tree, "2DMeshAnalysis/MingapScore.relative_min_search_radius", cfg.relative_min_search_radius);
-        load_value(tree, "2DMeshAnalysis/MingapScore.dihedral_angle_threshold_rad", cfg.dihedral_angle_threshold_rad);
-        load_value(tree, "2DMeshAnalysis/MingapScore.face_aspect_ratio_limit", cfg.face_aspect_ratio_limit);
-        load_value(tree, "2DMeshAnalysis/MingapScore.edge_ratio_limit", cfg.edge_ratio_limit);
-        load_value(tree, "2DMeshAnalysis/MingapScore.min_diameter_fraction", cfg.min_diameter_fraction);
-        load_value(tree, "2DMeshAnalysis/MingapScore.gap_score_threshold", cfg.gap_score_threshold);
-        load_value(tree, "2DMeshAnalysis/MingapScore.score_percentile_fallback", cfg.score_percentile_fallback);
-
-        load_value(tree, "2DMeshAnalysis/MingapDesign.monitor_histogram_base", cfg.monitor_histogram_base);
-        load_value(tree, "2DMeshAnalysis/MingapDesign.monitor_histogram_eps", cfg.monitor_histogram_eps);
-        load_value(tree, "2DMeshAnalysis/MingapDesign.histogram_target_fraction", cfg.histogram_target_fraction);
-        load_value(tree, "2DMeshAnalysis/MingapDesign.histogram_min_fraction_threshold", cfg.histogram_min_fraction_threshold);
-        load_value(tree, "2DMeshAnalysis/MingapDesign.histogram_max_fraction_threshold", cfg.histogram_max_fraction_threshold);
-
-        {
-          std::size_t parsed = cfg.max_histogram_span_bins;
-          if(auto raw = get_raw(tree, "2DMeshAnalysis/MingapDesign.max_histogram_span_bins"))
-          {
-            std::size_t temp;
-            if(parse_value(*raw, temp))
-            {
-              parsed = temp;
-            }
-          }
-          cfg.max_histogram_span_bins = parsed;
-        }
-        {
-          std::size_t parsed = cfg.min_histogram_span_bins;
-          if(auto raw = get_raw(tree, "2DMeshAnalysis/MingapDesign.min_histogram_span_bins"))
-          {
-            std::size_t temp;
-            if(parse_value(*raw, temp))
-            {
-              parsed = temp;
-            }
-          }
-          cfg.min_histogram_span_bins = parsed;
-        }
-
-        load_value(tree, "2DMeshAnalysis/MingapDesign.coarse_mesh_scaling", cfg.coarse_mesh_scaling);
       }
       catch(const std::exception&)
       {
         // keep defaults
       }
-      return cfg;
+      return tree;
     }
   } // namespace
 
   const MinGapConfig& min_gap_config()
   {
-    static const MinGapConfig config = load_config();
+    static const MinGapConfig config = load_min_gap_config(load_tree());
+    return config;
+  }
+
+  const RoundGeometryAnalysisConfig& round_geometry_analysis_config()
+  {
+    static const RoundGeometryAnalysisConfig config = load_round_geometry_analysis_config(load_tree());
     return config;
   }
 } // namespace MeshHexer

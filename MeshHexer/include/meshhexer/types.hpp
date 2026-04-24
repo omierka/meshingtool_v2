@@ -520,6 +520,59 @@ namespace MeshHexer
     std::vector<AnisotropicTriangleWarning> anisotropic_triangles;
   };
 
+  struct RoundGeometryInflow
+  {
+    Point center{0.0, 0.0, 0.0};
+    Point normal{0.0, 0.0, 0.0};
+    bool has_center = false;
+    bool has_normal = false;
+  };
+
+  enum class RoundGeometryClassification
+  {
+    Unknown,
+    FullCylinder,
+    HollowCylinder,
+  };
+
+  struct RoundGeometryAnalysisConfig
+  {
+    double top_slice_relative_epsilon = 1.0e-4;
+    double full_cylinder_inner_to_outer_threshold = 0.10;
+    double axial_inflow_tolerance_deg = 5.0;
+    double mantle_normal_max_abs_z = 0.5;
+    double axis_alignment_tolerance = 1.0e-4;
+    double extrusion_length_consistency_relative_tolerance = 0.05;
+    int preprocessing_export_precision = 2;
+    double preprocessing_sel_tangential = 1.25;
+    double preprocessing_sel_radial = 0.80;
+    double preprocessing_sel_axial = 1.25;
+    int preprocessing_fullcylinder_periodicity = 4;
+    double preprocessing_sel_x = 1.0;
+    double preprocessing_sel_y = 1.0;
+    double preprocessing_sel_z = 1.0;
+  };
+
+  struct RoundGeometryAnalysisResult
+  {
+    Point axis_center{0.0, 0.0, 0.0};
+    bool axis_aligned_to_origin = true;
+    double top_slice_z = 0.0;
+
+    double outer_diameter = 0.0;
+    double inner_diameter = 0.0;
+    double inner_to_outer_ratio = 0.0;
+    RoundGeometryClassification classification = RoundGeometryClassification::Unknown;
+
+    double extrusion_length = 0.0;
+    bool extrusion_length_consistent = true;
+    std::vector<double> extrusion_length_samples;
+
+    bool z_min_limited_by_axial_inflow = false;
+    double z_min_physical = 0.0;
+    double z_max_physical = 0.0;
+  };
+
   /**
    * \brief Tagged union for error-handling. Contains either a success value of type T or an error value of type E
    */

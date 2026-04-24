@@ -38,3 +38,20 @@ install(PROGRAMS
   PostProc/render_filtered_snapshot.py
   DESTINATION bin
 )
+
+# Install project documentation into the release tree.
+install(FILES README.md DESTINATION docs)
+install(FILES
+  MeshCleaner/README
+  MeshHexer/README.md
+  DESTINATION docs
+)
+install(DIRECTORY
+  MeshCleaner/docs
+  MeshDeform/docs
+  MeshRef/docs
+  PostProc/docs
+  DESTINATION docs
+)
+install(DIRECTORY MonitorGeneratorForMesher/doc DESTINATION docs)
+install(DIRECTORY MeshHexer/docs DESTINATION docs)

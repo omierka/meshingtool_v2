@@ -15,8 +15,9 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
-#include <sstream>
 #include <optional>
+#include <numeric>
+#include <sstream>
 #include <unistd.h>
 
 #include <CGAL/Bbox_3.h>
@@ -25,8 +26,12 @@
 #include <CGAL/Polygon_mesh_processing/locate.h>
 #include <CGAL/Polygon_mesh_processing/measure.h>
 #include <CGAL/Polygon_mesh_processing/orientation.h>
+#include <CGAL/Polygon_mesh_slicer.h>
 #include <CGAL/Polygon_mesh_processing/self_intersections.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
+#include <CGAL/squared_distance_2.h>
+
+#include <Eigen/Dense>
 
 namespace MeshHexer
 {
@@ -34,6 +39,12 @@ namespace MeshHexer
 
   namespace
   {
+    struct WeightedSample
+    {
+      double value = 0.0;
+      double weight = 0.0;
+    };
+
     bool ends_with(const std::string& string, const std::string& ending)
     {
       if(ending.size() > string.size())
@@ -41,6 +52,129 @@ namespace MeshHexer
         return false;
       }
       return std::equal(ending.rbegin(), ending.rend(), string.rbegin());
+    }
+
+    double squared_distance_xy(const Point3D& a, const Point3D& b)
+    {
+      const double dx = a.x() - b.x();
+      const double dy = a.y() - b.y();
+      return (dx * dx) + (dy * dy);
+    }
+
+    double polygon_area_xy(const std::vector<Point3D>& polyline)
+    {
+      if(polyline.size() < 3)
+      {
+        return 0.0;
+      }
+
+      double area = 0.0;
+      for(std::size_t i = 0; i + 1 < polyline.size(); ++i)
+      {
+        area += (polyline[i].x() * polyline[i + 1].y()) - (polyline[i + 1].x() * polyline[i].y());
+      }
+      return std::abs(area) * 0.5;
+    }
+
+    std::optional<Point> fit_circle_xy(const std::vector<Point3D>& polyline)
+    {
+      std::vector<Point3D> points;
+      points.reserve(polyline.size());
+      for(const Point3D& p : polyline)
+      {
+        if(points.empty() || squared_distance_xy(points.back(), p) > 1e-24)
+        {
+          points.push_back(p);
+        }
+      }
+      if(points.size() > 1 && squared_distance_xy(points.front(), points.back()) < 1e-24)
+      {
+        points.pop_back();
+      }
+      if(points.size() < 3)
+      {
+        return std::nullopt;
+      }
+
+      Eigen::Matrix3d ata = Eigen::Matrix3d::Zero();
+      Eigen::Vector3d atb = Eigen::Vector3d::Zero();
+      for(const Point3D& p : points)
+      {
+        const double x = p.x();
+        const double y = p.y();
+        const Eigen::Vector3d row(x, y, 1.0);
+        ata += row * row.transpose();
+        atb += -(x * x + y * y) * row;
+      }
+
+      if(std::abs(ata.determinant()) < 1e-18)
+      {
+        return std::nullopt;
+      }
+
+      const Eigen::Vector3d solution = ata.ldlt().solve(atb);
+      return Point{-0.5 * solution[0], -0.5 * solution[1], 0.0};
+    }
+
+    double vector_length_xy(const Vector3D& v)
+    {
+      return std::sqrt((v.x() * v.x()) + (v.y() * v.y()));
+    }
+
+    double point_radius_xy(const Point3D& point, const Point& axis_center)
+    {
+      const double dx = point.x() - axis_center.x;
+      const double dy = point.y() - axis_center.y;
+      return std::sqrt((dx * dx) + (dy * dy));
+    }
+
+    double minimal_distance_to_axis_line(const Mesh& mesh, const Point& axis_center)
+    {
+      using Triangle2D = Kernel::Triangle_2;
+
+      const Point2D axis_point(axis_center.x, axis_center.y);
+
+      double min_squared_distance = std::numeric_limits<double>::max();
+      for(FaceIndex face_index : mesh.faces())
+      {
+        std::array<Point2D, 3> points;
+        int point_idx = 0;
+        for(VertexIndex vertex_index : mesh.vertices_around_face(mesh.halfedge(face_index)))
+        {
+          if(point_idx < 3)
+          {
+            const Point3D& point = mesh.point(vertex_index);
+            points[point_idx] = Point2D(point.x(), point.y());
+          }
+          point_idx++;
+        }
+
+        if(point_idx != 3)
+        {
+          continue;
+        }
+
+        const Triangle2D triangle(points[0], points[1], points[2]);
+        min_squared_distance = std::min(
+          min_squared_distance,
+          CGAL::to_double(CGAL::squared_distance(axis_point, triangle)));
+      }
+
+      if(min_squared_distance == std::numeric_limits<double>::max())
+      {
+        return 0.0;
+      }
+      return std::sqrt(std::max(0.0, min_squared_distance));
+    }
+
+    double maximal_distance_to_axis(const Mesh& mesh, const Point& axis_center)
+    {
+      double max_radius = 0.0;
+      for(VertexIndex vertex_index : mesh.vertices())
+      {
+        max_radius = std::max(max_radius, point_radius_xy(mesh.point(vertex_index), axis_center));
+      }
+      return max_radius;
     }
   } // namespace
 
@@ -117,6 +251,14 @@ namespace MeshHexer
 
     /// \copydoc SurfaceMesh::faces_with_small_area()
     std::vector<std::size_t> faces_with_small_area(double relative_threshold) const;
+
+    /// \copydoc SurfaceMesh::round_geometry_analysis()
+    Result<RoundGeometryAnalysisResult, std::string> round_geometry_analysis(
+      const std::vector<RoundGeometryInflow>& inflows,
+      const RoundGeometryAnalysisConfig& config) const;
+
+    /// \copydoc SurfaceMesh::translate()
+    void translate(double dx, double dy, double dz);
 
     /// \copydoc SurfaceMesh::write_to_file()
     Result<void, std::string> write_to_file(const std::string& filename);
@@ -240,9 +382,18 @@ namespace MeshHexer
   {
     using ResultType = Result<void, std::string>;
 
-    if(!ends_with(filename, ".ply") && !ends_with(filename, ".vtu"))
+    if(!ends_with(filename, ".off") && !ends_with(filename, ".ply") && !ends_with(filename, ".vtu"))
     {
-      return ResultType::err("Can only write .ply or .vtu files");
+      return ResultType::err("Can only write .off, .ply or .vtu files");
+    }
+
+    if(ends_with(filename, ".off"))
+    {
+      if(!CGAL::IO::write_polygon_mesh(filename, _mesh))
+      {
+        return ResultType::err("Failed to write mesh to opened file");
+      }
+      return {};
     }
 
     std::ofstream output(filename);
@@ -270,6 +421,15 @@ namespace MeshHexer
     }
 
     return {};
+  }
+
+  void SurfaceMesh::SurfaceMeshImpl::translate(double dx, double dy, double dz)
+  {
+    for(VertexIndex vertex_index : _mesh.vertices())
+    {
+      const Point3D& point = _mesh.point(vertex_index);
+      _mesh.point(vertex_index) = Point3D(point.x() + dx, point.y() + dy, point.z() + dz);
+    }
   }
 
   void SurfaceMesh::SurfaceMeshImpl::write_monitor_histogram_file(const std::filesystem::path& reference_path) const
@@ -452,6 +612,182 @@ namespace MeshHexer
     return indices;
   }
 
+  Result<RoundGeometryAnalysisResult, std::string> SurfaceMesh::SurfaceMeshImpl::round_geometry_analysis(
+    const std::vector<RoundGeometryInflow>& inflows,
+    const RoundGeometryAnalysisConfig& config) const
+  {
+    using ResultType = Result<RoundGeometryAnalysisResult, std::string>;
+
+    if(_mesh.is_empty())
+    {
+      return ResultType::err("Round geometry analysis requires a non-empty mesh.");
+    }
+    if(inflows.empty())
+    {
+      return ResultType::err("Round geometry analysis requires at least one inflow description.");
+    }
+
+    const BoundingBox bb = MeshHexer::bounding_box(_mesh);
+    const double z_extent = bb.max.z - bb.min.z;
+    if(z_extent <= 0.0)
+    {
+      return ResultType::err("Round geometry analysis requires a positive z extent.");
+    }
+
+    const double z_slice = bb.max.z - (config.top_slice_relative_epsilon * z_extent);
+    const double close_tol_sq = std::max(1e-24, std::pow(mesh_size(_mesh) * 1e-8, 2.0));
+
+    CGAL::Polygon_mesh_slicer<Mesh, Kernel> slicer(_mesh);
+    Polylines3D polylines;
+    slicer(Plane3D(Point3D(0.0, 0.0, z_slice), Vector3D(0.0, 0.0, 1.0)), std::back_inserter(polylines));
+
+    std::vector<Point3D> selected_loop;
+    double selected_area = -1.0;
+    for(const Polyline3D& polyline : polylines)
+    {
+      if(polyline.size() < 3)
+      {
+        continue;
+      }
+
+      std::vector<Point3D> loop(polyline.begin(), polyline.end());
+      if(squared_distance_xy(loop.front(), loop.back()) > close_tol_sq)
+      {
+        continue;
+      }
+      if(squared_distance_xy(loop.front(), loop.back()) > 0.0)
+      {
+        loop.push_back(loop.front());
+      }
+
+      const double area = polygon_area_xy(loop);
+      if(area > selected_area)
+      {
+        selected_area = area;
+        selected_loop = std::move(loop);
+      }
+    }
+
+    if(selected_loop.empty())
+    {
+      return ResultType::err("Failed to extract a closed outer loop from the z-max slice.");
+    }
+
+    const std::optional<Point> maybe_center = fit_circle_xy(selected_loop);
+    if(!maybe_center.has_value())
+    {
+      return ResultType::err("Failed to fit a circle to the z-max slice.");
+    }
+    const Point axis_center = maybe_center.value();
+
+    double outer_radius = maximal_distance_to_axis(_mesh, axis_center);
+    double inner_radius = minimal_distance_to_axis_line(_mesh, axis_center);
+
+    std::vector<double> outer_radius_limits;
+    std::vector<double> extrusion_lengths;
+    outer_radius_limits.reserve(inflows.size());
+    extrusion_lengths.reserve(inflows.size());
+
+    const double axial_dot_threshold = std::cos((config.axial_inflow_tolerance_deg / 180.0) * M_PI);
+    const double radial_constraint_tol = std::max(mesh_size(_mesh) * 1e-6, 1e-9);
+    bool z_min_limited = false;
+
+    for(const RoundGeometryInflow& inflow : inflows)
+    {
+      if(!inflow.has_center || !inflow.has_normal)
+      {
+        continue;
+      }
+
+      const Point3D inflow_center(inflow.center.x, inflow.center.y, inflow.center.z);
+      Vector3D inflow_normal(inflow.normal.x, inflow.normal.y, inflow.normal.z);
+      const double inflow_normal_length = std::sqrt(inflow_normal.squared_length());
+      if(inflow_normal_length <= 0.0)
+      {
+        continue;
+      }
+      inflow_normal = inflow_normal / inflow_normal_length;
+
+      const double inflow_radius = point_radius_xy(inflow_center, axis_center);
+      const double inflow_normal_xy_length = vector_length_xy(inflow_normal);
+      if(inflow_radius > radial_constraint_tol && inflow_normal_xy_length > radial_constraint_tol)
+      {
+        const double radial_x = (inflow_center.x() - axis_center.x) / inflow_radius;
+        const double radial_y = (inflow_center.y() - axis_center.y) / inflow_radius;
+        const double radial_alignment =
+          ((inflow_normal.x() * radial_x) + (inflow_normal.y() * radial_y)) / inflow_normal_xy_length;
+
+        if(radial_alignment < 0.0)
+        {
+          outer_radius_limits.push_back(inflow_radius);
+        }
+      }
+
+      double min_projection = std::numeric_limits<double>::max();
+      for(VertexIndex vertex_index : _mesh.vertices())
+      {
+        const Point3D point = _mesh.point(vertex_index);
+        const double projection = CGAL::scalar_product(Vector3D(inflow_center, point), inflow_normal);
+        min_projection = std::min(min_projection, projection);
+      }
+      if(min_projection != std::numeric_limits<double>::max())
+      {
+        extrusion_lengths.push_back(std::max(0.0, -min_projection));
+      }
+
+      if(inflow_normal.z() > axial_dot_threshold)
+      {
+        z_min_limited = true;
+      }
+    }
+
+    if(!outer_radius_limits.empty())
+    {
+      outer_radius = std::min(outer_radius, *std::min_element(outer_radius_limits.begin(), outer_radius_limits.end()));
+    }
+    if(outer_radius <= 0.0)
+    {
+      return ResultType::err("Round geometry analysis produced a non-positive outer radius.");
+    }
+    if(extrusion_lengths.empty())
+    {
+      return ResultType::err("Failed to estimate extrusion length from inflows.");
+    }
+
+    std::vector<double> sorted_lengths = extrusion_lengths;
+    std::sort(sorted_lengths.begin(), sorted_lengths.end());
+    const double extrusion_length = sorted_lengths[sorted_lengths.size() / 2];
+    const double extrusion_tol = std::max(
+      mesh_size(_mesh) * 1e-8,
+      config.extrusion_length_consistency_relative_tolerance * std::max(extrusion_length, 1.0));
+
+    RoundGeometryAnalysisResult result;
+    result.axis_center = axis_center;
+    result.axis_aligned_to_origin =
+      (std::abs(axis_center.x) <= config.axis_alignment_tolerance) &&
+      (std::abs(axis_center.y) <= config.axis_alignment_tolerance);
+    result.top_slice_z = z_slice;
+    result.outer_diameter = 2.0 * outer_radius;
+    result.inner_diameter = std::max(0.0, 2.0 * inner_radius);
+    result.inner_to_outer_ratio =
+      (result.outer_diameter > 0.0) ? (result.inner_diameter / result.outer_diameter) : 0.0;
+    result.classification =
+      (result.inner_to_outer_ratio < config.full_cylinder_inner_to_outer_threshold) ?
+        RoundGeometryClassification::FullCylinder :
+        RoundGeometryClassification::HollowCylinder;
+    result.extrusion_length = extrusion_length;
+    result.extrusion_length_consistent = std::all_of(
+      extrusion_lengths.begin(),
+      extrusion_lengths.end(),
+      [&](double value) { return std::abs(value - extrusion_length) <= extrusion_tol; });
+    result.extrusion_length_samples = std::move(extrusion_lengths);
+    result.z_min_limited_by_axial_inflow = z_min_limited;
+    result.z_min_physical = bb.min.z + (z_min_limited ? extrusion_length : 0.0);
+    result.z_max_physical = bb.max.z - extrusion_length;
+
+    return ResultType::ok(std::move(result));
+  }
+
   SurfaceMesh::SurfaceMesh() = default;
 
   SurfaceMesh::SurfaceMesh(std::unique_ptr<SurfaceMesh::SurfaceMeshImpl> ptr) : impl(std::move(ptr))
@@ -540,6 +876,18 @@ namespace MeshHexer
   std::vector<std::size_t> SurfaceMesh::faces_with_small_area(double relative_threshold) const
   {
     return impl->faces_with_small_area(relative_threshold);
+  }
+
+  Result<RoundGeometryAnalysisResult, std::string> SurfaceMesh::round_geometry_analysis(
+    const std::vector<RoundGeometryInflow>& inflows,
+    const RoundGeometryAnalysisConfig& config)
+  {
+    return impl->round_geometry_analysis(inflows, config);
+  }
+
+  void SurfaceMesh::translate(double dx, double dy, double dz)
+  {
+    impl->translate(dx, dy, dz);
   }
 
   Result<SurfaceMesh, std::string> load_from_file(const std::string& filename, bool triangulate)
