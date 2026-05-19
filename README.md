@@ -56,6 +56,13 @@ newgenmeshingtool --folder /path/to/input/directory
 ```
 to generate a coarse mesh.
 
+For a practical end-to-end example from the source tree, run:
+```
+python3 preprocessor.py case -f EXAMPLE -n <num_proc>
+```
+
+This uses the bundled [`EXAMPLE`](EXAMPLE) case and is the recommended first run for new users.
+
 The input directory given as an argument to ```newgenmeshingtool``` needs to contain the following files:
 - ```surface.off```, the surface mesh to generate a coarse mesh for
 - ```setup.e3d```, preprocessing and simulation settings
@@ -64,6 +71,27 @@ The input directory given as an argument to ```newgenmeshingtool``` needs to con
 The directory you are calling ```newgenmeshingtool``` from needs to contain the following files:
 - a ```PATCHES``` directory, containing the necessary patches for ```meshref```
 - a directory ```start``` containing a ```sampleRigidBody.xml```
+
+### First Practical Run
+
+The repository ships with a ready-to-use example folder:
+
+- [`EXAMPLE/setup.e3d`](EXAMPLE/setup.e3d)
+- [`EXAMPLE/surface.off`](EXAMPLE/surface.off)
+
+To execute the full preprocessing workflow for that case, run from the repository root:
+
+```
+python3 preprocessor.py case -f EXAMPLE -n <num_proc>
+```
+
+Replace `<num_proc>` with the number of MPI ranks you want to use.
+
+After installation, the same example folder is installed into the release tree as `EXAMPLE/`. If the install prefix is on your `PATH`, you can run the installed driver from the install root via:
+
+```
+gendie_preprocessor case -f EXAMPLE -n <num_proc>
+```
 
 ## Parallelization
 Parts of the application are parallelized using either OMP or MPI. Set a sane value for ```OMP_NUM_THREADS``` before running ```newgenmeshingtool``` and ensure it runs on a machine that can allocate 64 mpi processes.

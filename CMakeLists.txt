@@ -38,6 +38,7 @@ install(PROGRAMS
   PostProc/render_filtered_snapshot.py
   DESTINATION bin
 )
+install(DIRECTORY EXAMPLE DESTINATION .)
 
 # Install project documentation into the release tree.
 install(FILES README.md DESTINATION docs)
