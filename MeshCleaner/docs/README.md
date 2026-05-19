@@ -29,7 +29,7 @@ The binary lives at `./build/src/fortran_cgal`.  Useful flags:
 | Flag | Meaning |
 |------|---------|
 | `-h`, `--hex` | Path to the input hexahedral mesh (`*.tri` or ASCII `*.vtu`). |
-| `-t`, `--tri` | Path to the OFF surface mesh used for filtering. |
+| `-t`, `--tri` | Path to the OFF surface mesh used for filtering. The mesh must be a closed, non-self-intersecting triangle surface. |
 | `-s`, `--hex-scale` | Optional scale applied to the *input* hex mesh prior to filtering (defaults to 1.0). |
 | `-o`, `--output-folder` | Directory that contains `setup.e3d` and receives outputs.  The driver creates `<output>/meshDir` automatically. |
 
@@ -62,6 +62,17 @@ The driver now requires at least **two** MPI ranks: rank 0 handles orchestration
 2. For each hexahedron a minimal bounding sphere is computed; elements whose spheres intersect the surface, contain vertices inside the surface, or whose centres lie inside the surface are marked as “kept”.
 3. The connectivity and coordinates are then reduced to the kept elements. `Filtered.vtu` receives the unscaled coordinates (and carries `KNPR` plus any incoming `monitor` data), while `meshDir/Filtered.tri` is written with coordinates multiplied by 0.1 (as required by the consuming tooling).
 4. Boundary flags (`KNPR`) are recomputed: every hexahedral face is tracked, and the vertices belonging to faces that only appear once in the mesh receive `KNPR=1`.
+
+## Surface mesh requirements
+
+The OFF surface is not treated as an arbitrary triangle soup. The filtering path performs both distance queries and inside/outside classification, so the input surface must be suitable for solid queries:
+
+- closed (watertight),
+- purely triangular,
+- free of degenerate triangles,
+- free of self-intersections / overlapping interfaces.
+
+Composite OFF files that simply concatenate several bodies into one file are fine only when the bodies are disjoint or meet without overlapping triangles. If two components share overlapping surface patches, the mesh is rejected during load instead of entering CGAL with undefined behaviour.
 
 ## Boundary classification and outputs
 

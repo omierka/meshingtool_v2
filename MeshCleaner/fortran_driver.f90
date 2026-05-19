@@ -221,7 +221,7 @@ program fortran_cgal_demo
     c_path = to_c_string(trim(surface_file))
     mesh_handle = cgal_load_off(c_path)
     if (.not. c_associated(mesh_handle)) then
-        error stop "CGAL failed to load OFF file."
+        error stop "CGAL rejected the OFF file. Check stderr for mesh validity details."
     end if
 
     vertex_count = cgal_get_vertex_count(mesh_handle)

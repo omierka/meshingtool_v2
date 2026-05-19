@@ -31,7 +31,7 @@ add_subdirectory(MeshDeform)
 install(TARGETS meshhexer-cli DESTINATION bin)
 
 # Install unified Python driver (replaces runner.sh + run_all_cases.sh)
-install(PROGRAMS preprocessor.py DESTINATION bin)
+install(PROGRAMS preprocessor.py DESTINATION bin RENAME gendie_preprocessor)
 install(FILES preprocessor.cfg DESTINATION bin)
 install(PROGRAMS
   PostProc/render_all_snapshots.py

@@ -4,6 +4,7 @@
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Min_sphere_of_spheres_d.h>
 #include <CGAL/Min_sphere_of_spheres_d_traits_3.h>
+#include <CGAL/Polygon_mesh_processing/self_intersections.h>
 #include <CGAL/Polygon_mesh_processing/triangulate_faces.h>
 #include <CGAL/Side_of_triangle_mesh.h>
 #include <CGAL/Surface_mesh.h>
@@ -14,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,6 +41,75 @@ struct MeshHandle {
 };
 
 namespace {
+
+bool face_is_degenerate(const SurfaceMesh& mesh, SurfaceMesh::Face_index face) {
+    Kernel::Point_3 points[3];
+    std::size_t count = 0;
+    SurfaceMesh::Vertex_index vertices[3];
+
+    for (const auto vertex : CGAL::vertices_around_face(mesh.halfedge(face), mesh)) {
+        if (count >= 3) {
+            return true;
+        }
+        vertices[count] = vertex;
+        points[count] = mesh.point(vertex);
+        ++count;
+    }
+
+    if (count != 3) {
+        return true;
+    }
+
+    if (vertices[0] == vertices[1] || vertices[0] == vertices[2] || vertices[1] == vertices[2]) {
+        return true;
+    }
+
+    for (const auto& point : points) {
+        if (!std::isfinite(point.x()) || !std::isfinite(point.y()) || !std::isfinite(point.z())) {
+            return true;
+        }
+    }
+
+    return CGAL::collinear(points[0], points[1], points[2]);
+}
+
+bool validate_mesh_for_queries(const SurfaceMesh& mesh, std::string& reason) {
+    if (CGAL::is_empty(mesh) || mesh.number_of_vertices() == 0 || mesh.number_of_faces() == 0) {
+        reason = "mesh is empty";
+        return false;
+    }
+
+    if (!CGAL::is_triangle_mesh(mesh)) {
+        reason = "mesh is not purely triangular after triangulation";
+        return false;
+    }
+
+    if (!CGAL::is_closed(mesh)) {
+        reason = "mesh is not closed; inside/outside tests require a closed surface";
+        return false;
+    }
+
+    std::size_t degenerate_face_count = 0;
+    for (const auto face : mesh.faces()) {
+        if (face_is_degenerate(mesh, face)) {
+            ++degenerate_face_count;
+        }
+    }
+    if (degenerate_face_count > 0) {
+        reason = "mesh contains " + std::to_string(degenerate_face_count) + " degenerate triangle(s)";
+        return false;
+    }
+
+    std::vector<std::pair<SurfaceMesh::Face_index, SurfaceMesh::Face_index>> self_intersections;
+    PMP::self_intersections(mesh, std::back_inserter(self_intersections));
+    if (!self_intersections.empty()) {
+        reason = "mesh contains " + std::to_string(self_intersections.size()) +
+                 " self-intersection pair(s); overlapping component interfaces are not supported";
+        return false;
+    }
+
+    return true;
+}
 
 AABBTree* ensure_tree(const MeshHandle* handle) {
     if (handle == nullptr) {
@@ -79,6 +150,12 @@ MeshHandle* cgal_load_off(const char* path) {
 
     // Ensure purely triangular faces for predictable connectivity.
     PMP::triangulate_faces(handle->mesh);
+
+    std::string validation_error;
+    if (!validate_mesh_for_queries(handle->mesh, validation_error)) {
+        std::cerr << "CGAL rejected OFF mesh '" << path << "': " << validation_error << "\n";
+        return nullptr;
+    }
 
     return handle.release();
 }

@@ -1,0 +1,14 @@
+[E3DGeometryData/Preprocessing]
+MinGap = 40.0
+BarrelDiameter = 620.00
+BarrelLength = 1924.00
+AxialStartPosition = 0.00
+
+HexMesher = HybridCylinder
+FullCylinderPeriodicity = 4
+InnerDiameter = 100.0
+HybridCylinderSections = 0:500:full, 500:1200:hollow, 1200:1924:full
+
+sEl_Tangential = 1.25
+sEl_Radial = 0.80
+sEl_Axial = 1.25

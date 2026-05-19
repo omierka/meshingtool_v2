@@ -637,8 +637,10 @@ def run_case_command(args: argparse.Namespace, script_dir: Path) -> None:
     config_location = env.get("PREPROCESSOR_CONFIG") or str(script_dir / "preprocessor.cfg")
     config_path = Path(config_location)
     driver_config = load_driver_config(config_path)
+    raw_folder = Path(args.folder)
+    case_folder = raw_folder if raw_folder.is_absolute() else Path.cwd() / raw_folder
     runner = CaseRunner(
-        folder=Path(args.folder),
+        folder=case_folder,
         script_dir=script_dir,
         num_proc=args.num_proc,
         cleanup=args.cleanup,
@@ -660,7 +662,7 @@ def run_all_command(args: argparse.Namespace, script_dir: Path) -> None:
     raw_cases_dir = Path(args.cases_dir)
     ensure_required_binaries(script_dir)
     resolved_cases_dir = (
-        raw_cases_dir if raw_cases_dir.is_absolute() else script_dir / raw_cases_dir
+        raw_cases_dir if raw_cases_dir.is_absolute() else Path.cwd() / raw_cases_dir
     )
     cases = gather_cases(resolved_cases_dir)
     if not cases:
@@ -766,7 +768,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-f",
         "--folder",
         default="PROFEX",
-        help="Case folder to process.",
+        help="Case folder to process, relative to the current working directory unless absolute.",
     )
     case_parser.add_argument(
         "-n",
@@ -812,7 +814,7 @@ def build_parser() -> argparse.ArgumentParser:
     all_parser.add_argument(
         "--cases-dir",
         default="CASES",
-        help="Directory that stores individual case folders.",
+        help="Directory that stores individual case folders, relative to the current working directory unless absolute.",
     )
     all_parser.set_defaults(func=run_all_command)
     return parser
