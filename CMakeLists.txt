@@ -42,6 +42,7 @@ install(DIRECTORY EXAMPLE DESTINATION .)
 
 # Install project documentation into the release tree.
 install(FILES README.md DESTINATION docs)
+install(FILES docs/SingleNodeClusterGuide.md DESTINATION docs)
 install(FILES
   MeshCleaner/README
   MeshHexer/README.md

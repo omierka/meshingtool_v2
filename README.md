@@ -62,6 +62,7 @@ python3 preprocessor.py case -f EXAMPLE -n <num_proc>
 ```
 
 This uses the bundled [`EXAMPLE`](EXAMPLE) case and is the recommended first run for new users.
+For cluster-oriented runtime guidance, see [`docs/SingleNodeClusterGuide.md`](docs/SingleNodeClusterGuide.md).
 
 The input directory given as an argument to ```newgenmeshingtool``` needs to contain the following files:
 - ```surface.off```, the surface mesh to generate a coarse mesh for
