@@ -68,6 +68,7 @@ class CaseRunner:
         folder: Path,
         script_dir: Path,
         num_proc: int,
+        use_srun: bool,
         cleanup: bool,
         silent: bool,
         base_env: Dict[str, str],
@@ -78,6 +79,7 @@ class CaseRunner:
         self.script_dir = script_dir
         self.folder = folder if folder.is_absolute() else script_dir / folder
         self.num_proc = num_proc
+        self.use_srun = use_srun
         self.cleanup = cleanup
         self.silent = silent
         self.env = dict(base_env)
@@ -97,6 +99,11 @@ class CaseRunner:
 
     def _cmd_path(self, name: str) -> str:
         return str((self.script_dir / name).resolve())
+
+    def _mpi_command(self, executable: str, *args: str) -> List[str]:
+        if self.use_srun:
+            return ["srun", executable, *args]
+        return ["mpirun", "-np", str(self.num_proc), executable, *args]
 
     def _record_stage(self, label: int) -> None:
         marker = f"[{label}]"
@@ -355,10 +362,7 @@ class CaseRunner:
 
         self._record_stage(3)
         self._run_command(
-            (
-                "mpirun",
-                "-np",
-                str(self.num_proc),
+            self._mpi_command(
                 self._cmd_path("meshcleaner"),
                 "-h",
                 str(coarse_dir / "Mesh.tri"),
@@ -386,10 +390,7 @@ class CaseRunner:
 
         self._record_stage(4)
         self._run_command(
-            (
-                "mpirun",
-                "-np",
-                str(self.num_proc),
+            self._mpi_command(
                 self._cmd_path("hex_VS_triangulation_intersection"),
                 "-h",
                 str(coarse_dir / "Mesh.tri"),
@@ -429,10 +430,7 @@ class CaseRunner:
 
         self._remove_monitor_files()
         self._run_command(
-            (
-                "mpirun",
-                "-np",
-                str(self.num_proc),
+            self._mpi_command(
                 self._cmd_path("meshcleaner"),
                 "-h",
                 str(refined_mesh),
@@ -643,6 +641,7 @@ def run_case_command(args: argparse.Namespace, script_dir: Path) -> None:
         folder=case_folder,
         script_dir=script_dir,
         num_proc=args.num_proc,
+        use_srun=args.use_srun,
         cleanup=args.cleanup,
         silent=args.silent,
         base_env=env,
@@ -693,6 +692,7 @@ def run_all_command(args: argparse.Namespace, script_dir: Path) -> None:
             folder=case_path,
             script_dir=script_dir,
             num_proc=args.num_proc,
+            use_srun=args.use_srun,
             cleanup=args.clean,
             silent=True,
             base_env=env,
@@ -755,6 +755,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-modules",
         action="store_true",
         help="Skip invoking environment modules before running commands.",
+    )
+    common.add_argument(
+        "-u",
+        "--use-srun",
+        action="store_true",
+        help="Launch MPI stages with 'srun <executable>' instead of mpirun.",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)

@@ -17,6 +17,16 @@ gendie_preprocessor case -f EXAMPLE -n <mpi_ranks>
 ```
 
 `-n` controls the MPI rank count used by the MPI-based stages.
+The default launcher is `mpirun -np <mpi_ranks>`. When running inside an
+existing Slurm allocation, `--use-srun` switches the MPI stages to
+`srun <executable>`, matching the behavior of the provided SRUN examples:
+
+```bash
+python3 preprocessor.py case --use-srun -f EXAMPLE -n <mpi_ranks>
+```
+
+In this mode, `srun` inherits its task count from the Slurm allocation; the
+driver does not pass `-n` to `srun`.
 
 ## Workflow Sequence
 
@@ -131,6 +141,10 @@ python3 preprocessor.py case -f EXAMPLE -n 32
 ```
 
 This layout keeps the run on one node, gives the MPI stages 32 ranks, and gives the OpenMP stages 32 threads.
+
+To use Slurm's embedded launcher for the MPI stages, add `--use-srun` to the
+final command. The surrounding `#SBATCH --ntasks=32` allocation then determines
+the number of tasks used by each `srun` step.
 
 ## Operational Summary
 

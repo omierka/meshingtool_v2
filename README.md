@@ -139,6 +139,16 @@ This runs the full preprocessing workflow on the bundled example case. The
 `meshcleaner` is MPI-based. The `--skip-modules` option tells the driver not to
 reload modules internally because the environment was already prepared above.
 
+By default, MPI stages use `mpirun -np <num_proc>`. Within an existing Slurm
+allocation, pass `--use-srun` to launch them as `srun <executable>` instead:
+
+```
+bin/gendie_preprocessor case --use-srun -f EXAMPLE -n 2 --skip-modules
+```
+
+In `--use-srun` mode, the task count is inherited from the Slurm allocation;
+`-n` is not added to the `srun` command.
+
 For a larger single-node run, increase both the OpenMP thread count and the MPI
 rank count according to the node size, for example:
 
