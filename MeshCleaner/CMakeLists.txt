@@ -1,7 +1,7 @@
-find_package(CGAL REQUIRED COMPONENTS Core)
+find_package(CGAL REQUIRED)
 
 add_library(cgal_wrapper STATIC cgal_interface.cpp)
-target_link_libraries(cgal_wrapper PUBLIC CGAL::CGAL CGAL::CGAL_Core)
+target_link_libraries(cgal_wrapper PUBLIC CGAL::CGAL)
 target_compile_features(cgal_wrapper PRIVATE cxx_std_17)
 
 add_executable(meshcleaner

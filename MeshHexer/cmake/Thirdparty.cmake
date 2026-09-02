@@ -19,11 +19,13 @@ get_tpl(
   PUBLIC
 )
 
+set(BOOST_CHARCONV_QUADMATH_FOUND OFF CACHE BOOL "" FORCE)
 get_tpl(
   PACKAGE_NAME Boost
   VERSION 1.88
   URL https://github.com/boostorg/boost/releases/download/boost-1.88.0/boost-1.88.0-cmake.zip
   URL_HASH MD5=419f6a9273cb90d4f3f65ca0ae02cd00
+  CONFIG
   PUBLIC
 )
 

@@ -1,4 +1,4 @@
-find_package(CGAL REQUIRED COMPONENTS Core)
+find_package(CGAL REQUIRED)
 find_package(MPI REQUIRED)
 
 add_executable(meshdeform
@@ -14,7 +14,7 @@ set_target_properties(meshdeform
     Fortran_MODULE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
 )
 
-target_link_libraries(meshdeform PRIVATE CGAL::CGAL CGAL::CGAL_Core cgal_wrapper)
+target_link_libraries(meshdeform PRIVATE CGAL::CGAL cgal_wrapper)
 target_link_libraries(meshdeform PRIVATE MPI::MPI_Fortran)
 
 install(TARGETS meshdeform DESTINATION bin)
